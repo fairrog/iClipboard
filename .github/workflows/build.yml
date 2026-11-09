@@ -95,6 +95,16 @@ jobs:
             MARKETING_VERSION="$VERSION" \
             build
 
+      - name: Ad-hoc sign app bundle
+        run: |
+          set -euxo pipefail
+          APP='build/DerivedData/Build/Products/Release/iClipboard.app'
+          # TCC (Screen Recording) needs a valid, stable bundle signature.
+          # The linker-only ad-hoc signature from CODE_SIGNING_ALLOWED=NO is
+          # not enough and can make macOS re-prompt on every capture.
+          codesign --force --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
       - name: Verify and package app
         shell: bash
         run: |
