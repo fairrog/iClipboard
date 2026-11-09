@@ -258,12 +258,17 @@ final class ScreenCaptureSession {
             }
             guard !self.isPerformingAction else { return event }
             if let workspace = panel.workspace {
+                // Only keyboard events enter annotation shortcuts. Mouse events
+                // must never reach NSEvent.keyCode: AppKit raises an exception
+                // for non-key events and the overlay flashes on every click.
+                guard event.type == .keyDown else { return event }
                 // Configured crop actions precede built-in shortcuts, but never
                 // consume annotation text input or events from native dialogs.
                 if panel.isKeyWindow, panel.isVisible, workspace.canRequestRecognizedText,
                    self.onContextualKeyEvent?(event) == true { return nil }
                 return workspace.handleKey(event) ? nil : event
             }
+            guard event.type == .keyDown else { return event }
             if event.keyCode == 53 {
                 self.cancel()
                 return nil
