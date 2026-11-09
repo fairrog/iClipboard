@@ -94,6 +94,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     private var selectionReleasePoint: CGPoint?
     private var toolbarOrigin: CGPoint?
     private var cropOverlay: CropSelectionOverlayView?
+    private var backgroundDragOrigin: CGRect?
     private let strip = CaptureToolbarStrip()
     private let controls = NSStackView()
     private let status = NSTextField(labelWithString: "")
@@ -182,6 +183,11 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             }
             addSubview(overlay, positioned: .above, relativeTo: textInteraction)
             cropOverlay = overlay
+            // Blank-pixel drags inside the crop move the whole selection. The
+            // frozen screen is required to re-crop, so a bare workspace has none.
+            session.canvasBackgroundDragAction = { [weak self] phase in
+                self?.handleCanvasBackgroundDrag(phase)
+            }
         }
         configureStrip()
         addSubview(strip)
@@ -376,6 +382,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         textInteraction.cancel()
         textInteraction.onStateChange = nil
         textInteraction.onWillCopySelection = nil
+        session.canvasBackgroundDragAction = nil
         session.onPixelsWillChange = nil
         session.onPixelsDidChange = nil
         subscriptions.removeAll()
@@ -460,12 +467,34 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         if toolbarOrigin == nil { toolbarOrigin = toolbarFrame.origin }
         let offset = CGPoint(x: cropPixels.minX - pixels.minX,
                              y: cropPixels.minY - pixels.minY)
-        session.recrop(to: ToolImage(cgImage: cropped, title: "截图"), offset: offset)
+        let image = ToolImage(cgImage: cropped, title: "截图")
+        if session.isDraggingBackground {
+            // The canvas owns this gesture; re-cropping must not cancel its drag
+            // state or the selection would stick after the first step.
+            session.recropWhileMovingBackground(to: image, offset: offset)
+        } else {
+            session.recrop(to: image, offset: offset)
+        }
         cropPixels = pixels
         imageRect = snapshot.geometry.appKitRect(forPixels: pixels)
             .offsetBy(dx: -snapshot.frame.minX, dy: -snapshot.frame.minY)
         layoutImage()
         scheduleRecognition(force: true)
+    }
+
+    /// A select-tool drag that starts on blank crop pixels moves the whole
+    /// selection over the frozen screen. Crop pixels, OCR, and annotations follow.
+    private func handleCanvasBackgroundDrag(_ phase: ImageEditorSession.CanvasDragPhase) {
+        guard !isBusy, !isInvalidated, snapshot != nil else { return }
+        switch phase {
+        case .began:
+            backgroundDragOrigin = imageRect
+        case let .changed(delta):
+            guard let origin = backgroundDragOrigin else { return }
+            applySelection(origin.offsetBy(dx: delta.width, dy: delta.height))
+        case .ended:
+            backgroundDragOrigin = nil
+        }
     }
 
     private func clampedSelection(_ proposed: CGRect, minimum: CGFloat = 8) -> CGRect {
@@ -583,7 +612,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             inputStyle = session.style
             layoutTextInput()
         }
-        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 拖动边框调整选区 · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
+        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 拖动边框或选区内部可调整选区 · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
         status.textColor = errorMessage == nil && session.errorMessage == nil ? .secondaryLabelColor : .systemRed
         status.toolTip = status.stringValue
     }

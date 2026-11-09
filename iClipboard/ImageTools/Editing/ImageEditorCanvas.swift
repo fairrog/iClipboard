@@ -152,9 +152,14 @@ final class ImageEditorCanvasView: NSView {
         }
         if session.tool == .select {
             let tolerance = 7 / transform.scale
-            if session.selectionHandle(at: pixel, tolerance: tolerance) != nil {
+            if session.isDraggingBackground {
+                NSCursor.closedHand.set()
+            } else if session.selectionHandle(at: pixel, tolerance: tolerance) != nil {
                 NSCursor.crosshair.set()
             } else if session.document.annotation(at: pixel, tolerance: tolerance) != nil {
+                NSCursor.openHand.set()
+            } else if session.canvasBackgroundDragAction != nil {
+                // Blank crop pixels drag the whole selection over the frozen screen.
                 NSCursor.openHand.set()
             } else {
                 NSCursor.arrow.set()
@@ -176,20 +181,23 @@ final class ImageEditorCanvasView: NSView {
             needsDisplay = true
             return
         }
-        session.pointerDown(at: point, tolerance: 6 / transform.scale, clickCount: event.clickCount)
+        session.pointerDown(at: point, tolerance: 6 / transform.scale,
+                            clickCount: event.clickCount, windowPoint: event.locationInWindow)
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let point = transform.pixelPoint(fromView: convert(event.locationInWindow, from: nil), clamped: true) else { return }
-        session.pointerDragged(to: point)
+        session.pointerDragged(to: point, windowPoint: event.locationInWindow)
+        if session.isDraggingBackground { NSCursor.closedHand.set() }
         autoscroll(with: event)
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         guard let point = transform.pixelPoint(fromView: convert(event.locationInWindow, from: nil), clamped: true) else { return }
-        session.pointerUp(at: point)
+        session.pointerUp(at: point, windowPoint: event.locationInWindow)
+        updatePointerCursor(event)
         needsDisplay = true
     }
 
