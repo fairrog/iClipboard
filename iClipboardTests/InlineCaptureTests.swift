@@ -135,7 +135,7 @@ final class InlineCaptureTests: XCTestCase {
         _ = try await task.value
     }
 
-    func testDraggingBlankCanvasMovesCropAndUpdatesPinAnchor() async throws {
+    func testDraggingCropBorderResizesAndRecropsTheImage() async throws {
         var pinnedAnchor: CGRect?
         let (capture, task, panel) = try await startCapture { action in
             if case let .pinImage(_, anchor) = action { pinnedAnchor = anchor }
@@ -144,22 +144,49 @@ final class InlineCaptureTests: XCTestCase {
         defer { capture.cancel() }
         try drag(panel, from: CGPoint(x: 180, y: 200), to: CGPoint(x: 480, y: 400))
         let workspace = try XCTUnwrap(panel.workspace)
-        let before = workspace.imageRect
+        XCTAssertEqual(workspace.imageRect, CGRect(x: 180, y: 200, width: 300, height: 200))
+        XCTAssertEqual(workspace.session.document.original.pixelSize,
+                       CGSize(width: 300, height: 200))
 
-        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 240, y: 280))
-        try mouse(panel, type: .leftMouseDragged, at: CGPoint(x: 300, y: 340))
-        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 300, y: 340))
+        // Drag the bottom-right handle outwards: the crop itself grows.
+        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 480, y: 400))
+        try mouse(panel, type: .leftMouseDragged, at: CGPoint(x: 520, y: 440))
+        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 520, y: 440))
 
-        XCTAssertEqual(workspace.imageRect, before.offsetBy(dx: 60, dy: 60))
+        XCTAssertEqual(workspace.imageRect, CGRect(x: 180, y: 200, width: 340, height: 240))
         XCTAssertEqual(workspace.canvas.frame, workspace.imageRect)
-        XCTAssertEqual(workspace.session.document.annotations, [])
+        XCTAssertEqual(workspace.session.document.original.pixelSize,
+                       CGSize(width: 340, height: 240),
+                       "The image must be re-cropped, not just moved")
 
         workspace.requestImageAction(.pin)
         let result = try await task.value
         guard case .completed? = result else {
-            return XCTFail("Pin should finish the moved capture")
+            return XCTFail("Pin should finish the adjusted capture")
         }
-        XCTAssertEqual(pinnedAnchor, CGRect(x: 240, y: 260, width: 300, height: 200))
+        XCTAssertEqual(pinnedAnchor, CGRect(x: 180, y: 200, width: 340, height: 240))
+    }
+
+    func testDraggingCropBorderMovesSelectionAndKeepsAnnotationsAnchored() async throws {
+        let (capture, task, panel) = try await startCapture()
+        defer { capture.cancel() }
+        try drag(panel, from: CGPoint(x: 180, y: 200), to: CGPoint(x: 480, y: 400))
+        let workspace = try XCTUnwrap(panel.workspace)
+        workspace.session.document.add(
+            ImageAnnotation(kind: .brush, points: [CGPoint(x: 20, y: 20)])
+        )
+
+        // Drag the top border away from its handles: move the whole selection.
+        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 250, y: 200))
+        try mouse(panel, type: .leftMouseDragged, at: CGPoint(x: 270, y: 230))
+        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 270, y: 230))
+
+        XCTAssertEqual(workspace.imageRect, CGRect(x: 200, y: 230, width: 300, height: 200))
+        XCTAssertEqual(workspace.session.document.original.pixelSize,
+                       CGSize(width: 300, height: 200))
+        XCTAssertEqual(workspace.session.document.annotations.first?.points.first,
+                       CGPoint(x: 0, y: 50),
+                       "Annotations stay over the same frozen-screen pixels")
     }
 
     func testEscapeBeforeAnySelectionClosesOverlayWithoutMouseFocus() async throws {

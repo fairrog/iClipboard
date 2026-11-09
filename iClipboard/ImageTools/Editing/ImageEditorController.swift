@@ -156,12 +156,6 @@ enum ImageEditorTool: String, CaseIterable, Identifiable {
 
 @MainActor
 final class ImageEditorSession: ObservableObject {
-    enum CanvasDragPhase: Equatable {
-        case began
-        case changed(CGSize)
-        case ended
-    }
-
     let document: ImageDocument
     @Published var tool: ImageEditorTool = .arrow {
         didSet { if tool != oldValue { cancelGesture() } }
@@ -193,9 +187,6 @@ final class ImageEditorSession: ObservableObject {
     /// A double-click on empty canvas is the fast copy path. Text labels keep
     /// their double-click-to-edit behaviour and never reach this callback.
     var doubleClickAction: (() -> Void)?
-    /// Select-tool drags on blank canvas move the whole captured image instead
-    /// of drawing. The workspace clamps the delta and keeps its own origin.
-    var canvasBackgroundDragAction: ((CanvasDragPhase) -> Void)?
 
     private var flattenedImage: CGImage
     private var subscriptions = Set<AnyCancellable>()
@@ -203,9 +194,6 @@ final class ImageEditorSession: ObservableObject {
     private var movingAnnotation: ImageAnnotation?
     private var resizingAnnotation: ImageAnnotation?
     private var resizingHandle: ImageAnnotationHandle?
-    private var backgroundDragStart: CGPoint?
-    private var backgroundDragStartWindow: CGPoint?
-    private var isDraggingBackground = false
     private var textAnchor: CGPoint?
     private var editingTextID: UUID?
     private var lastPreviewTime: TimeInterval = 0
@@ -313,8 +301,7 @@ final class ImageEditorSession: ObservableObject {
         syncMosaicSelection(id: document.selectedID, annotations: document.annotations)
     }
 
-    func pointerDown(at point: CGPoint, tolerance: CGFloat, clickCount: Int,
-                     windowPoint: CGPoint? = nil) {
+    func pointerDown(at point: CGPoint, tolerance: CGFloat, clickCount: Int) {
         guard isInputEnabled else { return }
         cancelGesture()
         switch tool {
@@ -347,10 +334,6 @@ final class ImageEditorSession: ObservableObject {
             document.selectedID = annotation?.id
             if let annotation { style = annotation.style }
             movingAnnotation = annotation
-            if annotation == nil {
-                backgroundDragStart = point
-                backgroundDragStartWindow = windowPoint
-            }
             startPoint = point
         case .text:
             beginText(at: point, annotation: nil)
@@ -369,7 +352,7 @@ final class ImageEditorSession: ObservableObject {
         }
     }
 
-    func pointerDragged(to point: CGPoint, windowPoint: CGPoint? = nil) {
+    func pointerDragged(to point: CGPoint) {
         guard isInputEnabled else { return }
         if tool == .eyedropper { sample(at: point); return }
         guard let startPoint else { return }
@@ -380,28 +363,6 @@ final class ImageEditorSession: ObservableObject {
             invalidatePixels()
             previewAnnotation = resized
             if pixelsInvalidated { renderPreview() }
-            return
-        }
-        if let backgroundDragStart {
-            // The canvas frame moves while the screenshot is dragged. Pixel
-            // coordinates are relative to that moving frame, so they cancel the
-            // motion and make the drag stick. Window points are stable.
-            let delta: CGSize
-            if let start = backgroundDragStartWindow, let windowPoint {
-                delta = CGSize(width: windowPoint.x - start.x,
-                               height: windowPoint.y - start.y)
-            } else {
-                delta = CGSize(width: point.x - backgroundDragStart.x,
-                               height: point.y - backgroundDragStart.y)
-            }
-            if !isDraggingBackground,
-               hypot(delta.width, delta.height) > 3 {
-                isDraggingBackground = true
-                canvasBackgroundDragAction?(.began)
-            }
-            if isDraggingBackground {
-                canvasBackgroundDragAction?(.changed(delta))
-            }
             return
         }
         let annotation: ImageAnnotation
@@ -426,15 +387,9 @@ final class ImageEditorSession: ObservableObject {
         if pixelsInvalidated { renderPreview() }
     }
 
-    func pointerUp(at point: CGPoint, windowPoint: CGPoint? = nil) {
+    func pointerUp(at point: CGPoint) {
         guard isInputEnabled, startPoint != nil else { return }
-        pointerDragged(to: point, windowPoint: windowPoint)
-        if isDraggingBackground {
-            canvasBackgroundDragAction?(.ended)
-            clearGestureState()
-            finishPixelChange()
-            return
-        }
+        pointerDragged(to: point)
         let annotation = previewAnnotation
         let original = movingAnnotation ?? resizingAnnotation
         clearGestureState()
@@ -450,7 +405,6 @@ final class ImageEditorSession: ObservableObject {
     /// Discard only the uncommitted gesture. A no-op cancel emits nothing;
     /// an invalidated preview restores the same revision and emits one DidChange.
     func cancelGesture() {
-        if isDraggingBackground { canvasBackgroundDragAction?(.ended) }
         let wasAdjustingMosaic = isAdjustingMosaic
         clearGestureState()
         if wasAdjustingMosaic { syncMosaicSelection(id: document.selectedID, annotations: document.annotations) }
@@ -483,6 +437,19 @@ final class ImageEditorSession: ObservableObject {
         invalidatePixels()
         document.replace(moved)
     }
+
+    /// Replace the crop from the frozen screen while keeping annotations over
+    /// the same source pixels. Existing undo/redo states shift with them.
+    func recrop(to image: ToolImage, offset: CGPoint) {
+        guard isInputEnabled else { return }
+        cancelGesture()
+        let previousRevision = revision
+        document.recrop(original: image, offset: offset)
+        if revision == previousRevision {
+            refresh(annotations: document.annotations)
+        }
+    }
+
     func cancelText() {
         isEditingText = false
         textDraft = ""
@@ -569,9 +536,6 @@ final class ImageEditorSession: ObservableObject {
         movingAnnotation = nil
         resizingAnnotation = nil
         resizingHandle = nil
-        backgroundDragStart = nil
-        backgroundDragStartWindow = nil
-        isDraggingBackground = false
         previewAnnotation = nil
         isAdjustingMosaic = false
         mosaicAdjustmentAnnotation = nil

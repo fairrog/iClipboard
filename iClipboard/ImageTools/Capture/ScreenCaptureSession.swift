@@ -320,6 +320,7 @@ final class ScreenCaptureSession {
             let image = try ScreenCaptureImageRenderer.independentCrop(of: snapshot.image, pixels: pixels)
             let result = ToolImage(cgImage: image, title: "截图")
             panel.beginEditing(image: result, anchor: snapshot.geometry.appKitRect(forPixels: pixels),
+                               snapshot: snapshot, pixels: pixels,
                                action: { [weak self] action in self?.perform(action) },
                                reselect: { [weak self] in self?.reselect() },
                                cancel: { [weak self] in self?.cancel() },

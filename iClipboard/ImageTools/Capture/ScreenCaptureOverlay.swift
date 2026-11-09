@@ -143,6 +143,7 @@ final class ScreenCaptureOverlayPanel: NSPanel {
     func showFeedback(_ message: String) { captureView?.showFeedback(message) }
 
     func beginEditing(image: ToolImage, anchor: CGRect,
+                      snapshot: ScreenCaptureSnapshot, pixels: CGRect,
                       action: @escaping (ScreenCaptureAction) -> Void,
                       reselect: @escaping () -> Void, cancel: @escaping () -> Void,
                       willCopySelection: @escaping () -> Void,
@@ -152,6 +153,7 @@ final class ScreenCaptureOverlayPanel: NSPanel {
         let rect = anchor.offsetBy(dx: -frame.minX, dy: -frame.minY)
         let workspace = ScreenCaptureWorkspace(image: image, imageRect: rect, anchor: anchor,
                                                bounds: captureView.bounds, releasePoint: captureView.selectionReleasePoint,
+                                               snapshot: snapshot, cropPixels: pixels,
                                                textInteraction: textInteraction)
         workspace.onAction = action
         workspace.onReselect = reselect

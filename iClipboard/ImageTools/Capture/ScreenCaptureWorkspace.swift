@@ -89,9 +89,11 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     private var pointerTrackingArea: NSTrackingArea?
     private var pointerLocationInWindow: CGPoint?
     private let anchor: CGRect
+    private let snapshot: ScreenCaptureSnapshot?
+    private var cropPixels: CGRect
     private var selectionReleasePoint: CGPoint?
     private var toolbarOrigin: CGPoint?
-    private var draggedImageOrigin: CGPoint?
+    private var cropOverlay: CropSelectionOverlayView?
     private let strip = CaptureToolbarStrip()
     private let controls = NSStackView()
     private let status = NSTextField(labelWithString: "")
@@ -122,12 +124,16 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     }
 
     init(image: ToolImage, imageRect: CGRect, anchor: CGRect, bounds: CGRect,
-         releasePoint: CGPoint? = nil, textInteraction injectedInteraction: InlineImageTextInteraction? = nil) {
+         releasePoint: CGPoint? = nil, snapshot: ScreenCaptureSnapshot? = nil,
+         cropPixels: CGRect? = nil,
+         textInteraction injectedInteraction: InlineImageTextInteraction? = nil) {
         self.session = ImageEditorSession(image: image)
         self.textInteraction = injectedInteraction ?? InlineImageTextInteraction(frame: .zero)
         self.canvas = ImageEditorCanvasView(session: session)
         self.imageRect = imageRect
         self.anchor = anchor
+        self.snapshot = snapshot
+        self.cropPixels = cropPixels ?? CGRect(origin: .zero, size: image.pixelSize)
         self.selectionReleasePoint = releasePoint
         super.init(frame: bounds)
         autoresizingMask = [.width, .height]
@@ -137,7 +143,6 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         layer?.backgroundColor = NSColor.clear.cgColor
         session.tool = .select
         session.doubleClickAction = { [weak self] in self?.requestImageAction(.copy) }
-        session.canvasBackgroundDragAction = { [weak self] phase in self?.handleCanvasDrag(phase) }
         canvas.frame = imageRect
         // The editor paints dirtyRect for its scrollable canvas. Constrain that
         // painting to this exact crop when embedded in a full-screen overlay.
@@ -156,6 +161,27 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             let tolerance = 7 / self.canvas.transform.scale
             if self.session.selectionHandle(at: pixel, tolerance: tolerance) != nil { return false }
             return self.session.document.annotation(at: pixel, tolerance: 4 / self.canvas.transform.scale) == nil
+        }
+        if snapshot != nil {
+            let overlay = CropSelectionOverlayView(frame: bounds)
+            overlay.autoresizingMask = [.width, .height]
+            overlay.selectionRect = imageRect
+            overlay.setAccessibilityElement(true)
+            overlay.setAccessibilityLabel("截图选区调整")
+            overlay.isPointBlocked = { [weak self] point in
+                guard let self else { return true }
+                return self.isBusy || self.isInvalidated || self.isChangingPixels
+                    || self.session.isEditingText
+                    || self.toolbarFrame.contains(point) || self.popover?.isShown == true
+                    || self.customColorPanel?.isVisible == true
+            }
+            overlay.onSelectionChange = { [weak self] rect in self?.applySelection(rect) }
+            overlay.onRightClick = { [weak self] event in
+                guard let self, self.shouldSampleRightClick(event) else { return }
+                self.onSamplePixel?(event)
+            }
+            addSubview(overlay, positioned: .above, relativeTo: textInteraction)
+            cropOverlay = overlay
         }
         configureStrip()
         addSubview(strip)
@@ -338,7 +364,8 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         onPointerChanged = nil
         onPointerExited = nil
         onImageMoved = nil
-        draggedImageOrigin = nil
+        cropOverlay?.removeFromSuperview()
+        cropOverlay = nil
         if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
         pointerTrackingArea = nil
         feedbackTask?.cancel()
@@ -351,7 +378,6 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         textInteraction.onWillCopySelection = nil
         session.onPixelsWillChange = nil
         session.onPixelsDidChange = nil
-        session.canvasBackgroundDragAction = nil
         subscriptions.removeAll()
         popover?.close()
         popover = nil
@@ -411,30 +437,44 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         if !handleKey(event) { super.keyDown(with: event) }
     }
 
-    private func handleCanvasDrag(_ phase: ImageEditorSession.CanvasDragPhase) {
-        switch phase {
-        case .began:
-            draggedImageOrigin = imageRect.origin
-        case let .changed(delta):
-            guard let origin = draggedImageOrigin else { return }
-            let maxX = bounds.maxX - imageRect.width
-            let maxY = bounds.maxY - imageRect.height
-            let x = min(max(bounds.minX, origin.x + delta.width), maxX)
-            let y = min(max(bounds.minY, origin.y + delta.height), maxY)
-            let applied = CGSize(width: x - imageRect.minX, height: y - imageRect.minY)
-            guard applied.width != 0 || applied.height != 0 else { return }
-            imageRect.origin = CGPoint(x: x, y: y)
-            selectionReleasePoint = selectionReleasePoint.map {
-                CGPoint(x: $0.x + applied.width, y: $0.y + applied.height)
-            }
-            if let toolbarOrigin {
-                self.toolbarOrigin = CGPoint(x: toolbarOrigin.x + applied.width,
-                                             y: toolbarOrigin.y + applied.height)
-            }
-            layoutImage()
-        case .ended:
-            draggedImageOrigin = nil
+    private func applySelection(_ proposed: CGRect) {
+        guard !isBusy, !isInvalidated, session.isInputEnabled, let snapshot else {
+            cropOverlay?.selectionRect = imageRect
+            return
         }
+        let rect = clampedSelection(proposed)
+        guard rect != imageRect else {
+            cropOverlay?.selectionRect = imageRect
+            return
+        }
+        let global = rect.offsetBy(dx: snapshot.frame.minX, dy: snapshot.frame.minY)
+        guard let pixels = snapshot.geometry.pixelRect(for: global),
+              pixels != cropPixels,
+              let cropped = try? ScreenCaptureImageRenderer.independentCrop(of: snapshot.image,
+                                                                             pixels: pixels) else {
+            cropOverlay?.selectionRect = imageRect
+            return
+        }
+        // Keep the toolbar steady while the user adjusts the border. Annotations
+        // are shifted by the crop-origin delta and stay over the same screen pixels.
+        if toolbarOrigin == nil { toolbarOrigin = toolbarFrame.origin }
+        let offset = CGPoint(x: cropPixels.minX - pixels.minX,
+                             y: cropPixels.minY - pixels.minY)
+        session.recrop(to: ToolImage(cgImage: cropped, title: "截图"), offset: offset)
+        cropPixels = pixels
+        imageRect = snapshot.geometry.appKitRect(forPixels: pixels)
+            .offsetBy(dx: -snapshot.frame.minX, dy: -snapshot.frame.minY)
+        layoutImage()
+        scheduleRecognition(force: true)
+    }
+
+    private func clampedSelection(_ proposed: CGRect, minimum: CGFloat = 8) -> CGRect {
+        var rect = proposed.standardized
+        rect.size.width = max(minimum, min(rect.width, bounds.width))
+        rect.size.height = max(minimum, min(rect.height, bounds.height))
+        rect.origin.x = min(max(bounds.minX, rect.minX), bounds.maxX - rect.width)
+        rect.origin.y = min(max(bounds.minY, rect.minY), bounds.maxY - rect.height)
+        return rect
     }
 
     private func layoutImage() {
@@ -442,6 +482,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         textInteraction.frame = imageRect
         canvas.transform = ImageCanvasTransform(pixelSize: session.document.original.pixelSize,
                                                 exactViewSize: imageRect.size)
+        cropOverlay?.selectionRect = imageRect
         canvas.needsDisplay = true
         window?.invalidateCursorRects(for: canvas)
         layoutWorkspace()
@@ -484,13 +525,13 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         refreshControls()
     }
 
-    private func scheduleRecognition(annotations: [ImageAnnotation]? = nil) {
+    private func scheduleRecognition(annotations: [ImageAnnotation]? = nil, force: Bool = false) {
         guard !isInvalidated else { return }
         // OCR belongs to the captured content, not the annotation renderer. Text,
         // arrows, colors, and their undo steps never become newly recognized words.
         // Redactions alone change this source so obscured text cannot be copied.
         let redactions = (annotations ?? session.document.annotations).filter { $0.kind == .mosaic }
-        guard recognitionRedactions != redactions || textInteraction.phase == .idle else { return }
+        guard force || recognitionRedactions != redactions || textInteraction.phase == .idle else { return }
         recognitionRedactions = redactions
         if redactions.isEmpty {
             textInteraction.update(image: session.document.original, revision: UUID())
@@ -526,6 +567,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         let useText = session.tool == .select && !session.isEditingText && !isBusy && !isChangingPixels
         textInteraction.isHidden = session.tool != .select || session.isEditingText || isChangingPixels
         textInteraction.interactionEnabled = useText
+        cropOverlay?.isHidden = isBusy || session.isEditingText || input != nil
         if session.isEditingText, input == nil { beginTextInput() }
         if !session.isEditingText, input != nil {
             input?.delegate = nil
@@ -541,7 +583,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             inputStyle = session.style
             layoutTextInput()
         }
-        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 拖动空白移动截图 · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
+        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 拖动边框调整选区 · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
         status.textColor = errorMessage == nil && session.errorMessage == nil ? .secondaryLabelColor : .systemRed
         status.toolTip = status.stringValue
     }
@@ -932,6 +974,196 @@ private final class ScreenCaptureAdjustmentSlider: NSSlider {
         onBegin?()
         defer { onEnd?() }
         super.mouseDown(with: event)
+    }
+}
+
+enum CropSelectionHandle: CaseIterable {
+    case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
+}
+
+enum CropSelectionGeometry {
+    static func moved(_ rect: CGRect, by delta: CGSize, in bounds: CGRect) -> CGRect {
+        var result = rect.offsetBy(dx: delta.width, dy: delta.height)
+        result.origin.x = min(max(bounds.minX, result.origin.x), bounds.maxX - result.width)
+        result.origin.y = min(max(bounds.minY, result.origin.y), bounds.maxY - result.height)
+        return result
+    }
+
+    static func resized(_ rect: CGRect, handle: CropSelectionHandle, to point: CGPoint,
+                        in bounds: CGRect, minimum: CGFloat = 8) -> CGRect {
+        let clampedPoint = CGPoint(x: min(max(bounds.minX, point.x), bounds.maxX),
+                                   y: min(max(bounds.minY, point.y), bounds.maxY))
+        var minX = rect.minX
+        var maxX = rect.maxX
+        var minY = rect.minY
+        var maxY = rect.maxY
+        var movesLeft = false
+        var movesRight = false
+        var movesTop = false
+        var movesBottom = false
+
+        switch handle {
+        case .topLeft:
+            minX = clampedPoint.x; minY = clampedPoint.y; movesLeft = true; movesTop = true
+        case .top:
+            minY = clampedPoint.y; movesTop = true
+        case .topRight:
+            maxX = clampedPoint.x; minY = clampedPoint.y; movesRight = true; movesTop = true
+        case .right:
+            maxX = clampedPoint.x; movesRight = true
+        case .bottomRight:
+            maxX = clampedPoint.x; maxY = clampedPoint.y; movesRight = true; movesBottom = true
+        case .bottom:
+            maxY = clampedPoint.y; movesBottom = true
+        case .bottomLeft:
+            minX = clampedPoint.x; maxY = clampedPoint.y; movesLeft = true; movesBottom = true
+        case .left:
+            minX = clampedPoint.x; movesLeft = true
+        }
+
+        if maxX - minX < minimum {
+            if movesLeft { minX = maxX - minimum }
+            if movesRight { maxX = minX + minimum }
+        }
+        if maxY - minY < minimum {
+            if movesTop { minY = maxY - minimum }
+            if movesBottom { maxY = minY + minimum }
+        }
+
+        minX = max(bounds.minX, min(minX, bounds.maxX - minimum))
+        maxX = min(bounds.maxX, max(maxX, minX + minimum))
+        minY = max(bounds.minY, min(minY, bounds.maxY - minimum))
+        maxY = min(bounds.maxY, max(maxY, minY + minimum))
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    static func handlePoints(for rect: CGRect) -> [(CropSelectionHandle, CGPoint)] {
+        [
+            (.topLeft, CGPoint(x: rect.minX, y: rect.minY)),
+            (.top, CGPoint(x: rect.midX, y: rect.minY)),
+            (.topRight, CGPoint(x: rect.maxX, y: rect.minY)),
+            (.right, CGPoint(x: rect.maxX, y: rect.midY)),
+            (.bottomRight, CGPoint(x: rect.maxX, y: rect.maxY)),
+            (.bottom, CGPoint(x: rect.midX, y: rect.maxY)),
+            (.bottomLeft, CGPoint(x: rect.minX, y: rect.maxY)),
+            (.left, CGPoint(x: rect.minX, y: rect.midY))
+        ]
+    }
+}
+
+/// Transparent interaction layer above the crop. It only receives events on the
+/// eight resize handles or the border band, so annotation input still works inside.
+@MainActor
+final class CropSelectionOverlayView: NSView {
+    var selectionRect: CGRect = .zero {
+        didSet {
+            guard oldValue != selectionRect else { return }
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+    var isPointBlocked: ((CGPoint) -> Bool)?
+    var onSelectionChange: ((CGRect) -> Void)?
+    var onRightClick: ((NSEvent) -> Void)?
+
+    private enum Drag {
+        case move(origin: CGRect)
+        case resize(handle: CropSelectionHandle, origin: CGRect)
+    }
+    private var drag: Drag?
+    private var dragStartWindow: CGPoint?
+
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let superview else { return nil }
+        let local = convert(point, from: superview)
+        guard !(isPointBlocked?(local) ?? false) else { return nil }
+        if handle(at: local) != nil || borderContains(local) { return self }
+        return nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let handle = handle(at: point) {
+            drag = .resize(handle: handle, origin: selectionRect)
+        } else if borderContains(point) {
+            drag = .move(origin: selectionRect)
+        } else {
+            drag = nil
+            return
+        }
+        dragStartWindow = event.locationInWindow
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let drag, let superview else { return }
+        let next: CGRect
+        switch drag {
+        case let .move(origin):
+            guard let start = dragStartWindow else { return }
+            let delta = CGSize(width: event.locationInWindow.x - start.x,
+                               height: event.locationInWindow.y - start.y)
+            next = CropSelectionGeometry.moved(origin, by: delta, in: superview.bounds)
+        case let .resize(handle, origin):
+            let point = convert(event.locationInWindow, from: nil)
+            next = CropSelectionGeometry.resized(origin, handle: handle, to: point,
+                                                 in: superview.bounds)
+        }
+        guard next != selectionRect else { return }
+        selectionRect = next
+        onSelectionChange?(next)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        drag = nil
+        dragStartWindow = nil
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?(event)
+    }
+
+    override func resetCursorRects() {
+        guard !selectionRect.isEmpty else { return }
+        for (_, point) in CropSelectionGeometry.handlePoints(for: selectionRect) {
+            addCursorRect(CGRect(x: point.x - 7, y: point.y - 7, width: 14, height: 14),
+                          cursor: .crosshair)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !selectionRect.isEmpty else { return }
+        let border = NSBezierPath(rect: selectionRect)
+        border.lineWidth = 1.5
+        NSColor.controlAccentColor.setStroke()
+        border.stroke()
+
+        NSColor.white.setFill()
+        NSColor.controlAccentColor.setStroke()
+        for (_, point) in CropSelectionGeometry.handlePoints(for: selectionRect) {
+            let rect = CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5)
+            path.fill()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+
+    private func handle(at point: CGPoint) -> CropSelectionHandle? {
+        let candidates = CropSelectionGeometry.handlePoints(for: selectionRect)
+            .map { (handle: $0.0, distance: hypot($0.1.x - point.x, $0.1.y - point.y)) }
+            .filter { $0.distance <= 8 }
+        return candidates.min(by: { $0.distance < $1.distance })?.handle
+    }
+
+    private func borderContains(_ point: CGPoint) -> Bool {
+        let band: CGFloat = 7
+        let outer = selectionRect.insetBy(dx: -band, dy: -band)
+        let inner = selectionRect.insetBy(dx: band, dy: band)
+        return outer.contains(point)
+            && (inner.isNull || inner.isEmpty || !inner.contains(point))
     }
 }
 

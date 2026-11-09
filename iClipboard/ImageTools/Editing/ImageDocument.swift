@@ -248,7 +248,7 @@ extension ImageAnnotation {
 /// History stores only value annotations, never a bitmap per undo step.
 @MainActor
 final class ImageDocument: ObservableObject {
-    let original: ToolImage
+    private(set) var original: ToolImage
     @Published private(set) var annotations: [ImageAnnotation] = []
     @Published var selectedID: UUID?
     @Published private(set) var canUndo = false
@@ -302,6 +302,18 @@ final class ImageDocument: ObservableObject {
 
     func markSaved(annotations saved: [ImageAnnotation]) {
         savedAnnotations = saved
+        updateFlags()
+    }
+
+    /// Replaces the crop while keeping annotations anchored to the same frozen
+    /// screen pixels. `offset` is oldCropOrigin - newCropOrigin in source pixels.
+    func recrop(original newOriginal: ToolImage, offset: CGPoint) {
+        original = newOriginal
+        let delta = CGSize(width: offset.x, height: offset.y)
+        annotations = annotations.map { $0.translated(by: delta) }
+        undoStates = undoStates.map { $0.map { $0.translated(by: delta) } }
+        redoStates = redoStates.map { $0.map { $0.translated(by: delta) } }
+        savedAnnotations = savedAnnotations.map { $0.translated(by: delta) }
         updateFlags()
     }
 

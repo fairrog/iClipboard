@@ -764,45 +764,33 @@ final class ImageDocumentTests: XCTestCase {
         XCTAssertEqual(session.document.annotations, [annotation])
     }
 
-    func testBlankSelectDragMovesImageWithoutCreatingAnnotation() throws {
-        let session = ImageEditorSession(image: try image(width: 120, height: 80))
-        session.tool = .select
-        var phases: [ImageEditorSession.CanvasDragPhase] = []
-        session.canvasBackgroundDragAction = { phases.append($0) }
+    func testCropSelectionMoveClampsToBounds() {
+        let bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let moved = CropSelectionGeometry.moved(
+            CGRect(x: 20, y: 30, width: 100, height: 50),
+            by: CGSize(width: 40, height: 20),
+            in: bounds
+        )
+        XCTAssertEqual(moved, CGRect(x: 60, y: 50, width: 100, height: 50))
 
-        session.pointerDown(at: CGPoint(x: 60, y: 40), tolerance: 1, clickCount: 1)
-        session.pointerDragged(to: CGPoint(x: 70, y: 45))
-        session.pointerDragged(to: CGPoint(x: 80, y: 50))
-        session.pointerUp(at: CGPoint(x: 80, y: 50))
-
-        let changes = phases.compactMap { phase -> CGSize? in
-            guard case let .changed(delta) = phase else { return nil }
-            return delta
-        }
-        XCTAssertEqual(phases.first, .began)
-        XCTAssertEqual(changes.last, CGSize(width: 20, height: 10))
-        XCTAssertEqual(phases.last, .ended)
-        XCTAssertTrue(session.document.annotations.isEmpty)
+        let clamped = CropSelectionGeometry.moved(
+            moved, by: CGSize(width: 1_000, height: -1_000), in: bounds
+        )
+        XCTAssertEqual(clamped, CGRect(x: 200, y: 0, width: 100, height: 50))
     }
 
-    func testBackgroundDragUsesStableWindowDeltaWhileCanvasMoves() throws {
-        // A Retina-like fixture: one view point covers two source pixels.
-        let session = ImageEditorSession(image: try image(width: 240, height: 160))
-        session.tool = .select
-        var deltas: [CGSize] = []
-        session.canvasBackgroundDragAction = { phase in
-            if case let .changed(delta) = phase { deltas.append(delta) }
-        }
+    func testCropSelectionResizeKeepsOppositeEdgeAndMinimumSize() {
+        let bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let rect = CGRect(x: 20, y: 30, width: 100, height: 50)
 
-        session.pointerDown(at: CGPoint(x: 120, y: 80), tolerance: 1, clickCount: 1,
-                            windowPoint: CGPoint(x: 100, y: 100))
-        session.pointerDragged(to: CGPoint(x: 80, y: 60),
-                               windowPoint: CGPoint(x: 130, y: 120))
-        session.pointerUp(at: CGPoint(x: 80, y: 60),
-                          windowPoint: CGPoint(x: 160, y: 140))
+        let resized = CropSelectionGeometry.resized(
+            rect, handle: .bottomRight, to: CGPoint(x: 180, y: 120), in: bounds
+        )
+        XCTAssertEqual(resized, CGRect(x: 20, y: 30, width: 160, height: 90))
 
-        XCTAssertEqual(deltas.last, CGSize(width: 60, height: 40),
-                       "Window deltas must not change when the canvas itself moves")
-        XCTAssertTrue(session.document.annotations.isEmpty)
+        let collapsed = CropSelectionGeometry.resized(
+            rect, handle: .topLeft, to: CGPoint(x: 500, y: 500), in: bounds
+        )
+        XCTAssertEqual(collapsed, CGRect(x: 112, y: 72, width: 8, height: 8))
     }
 }
