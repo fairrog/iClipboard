@@ -531,10 +531,6 @@ struct ImageCanvasTransform {
         CGPoint(x: imageRect.minX + point.x * scale, y: imageRect.minY + point.y * verticalScale)
     }
 
-    func viewDelta(fromPixel delta: CGSize) -> CGSize {
-        CGSize(width: delta.width * scale, height: delta.height * verticalScale)
-    }
-
     func pixelPoint(fromView point: CGPoint, clamped: Bool = false) -> CGPoint? {
         guard clamped || imageRect.contains(point) else { return nil }
         return CGPoint(x: max(0, min(imageRect.width, point.x - imageRect.minX)) / scale,

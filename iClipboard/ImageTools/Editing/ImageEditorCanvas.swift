@@ -171,25 +171,27 @@ final class ImageEditorCanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard session.isInputEnabled else { return }
         window?.makeFirstResponder(self)
+        let windowPoint = event.locationInWindow
         guard let point = transform.pixelPoint(fromView: convert(event.locationInWindow, from: nil)) else {
             session.document.selectedID = nil
             needsDisplay = true
             return
         }
-        session.pointerDown(at: point, tolerance: 6 / transform.scale, clickCount: event.clickCount)
+        session.pointerDown(at: point, tolerance: 6 / transform.scale,
+                            clickCount: event.clickCount, windowPoint: windowPoint)
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let point = transform.pixelPoint(fromView: convert(event.locationInWindow, from: nil), clamped: true) else { return }
-        session.pointerDragged(to: point)
+        session.pointerDragged(to: point, windowPoint: event.locationInWindow)
         autoscroll(with: event)
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         guard let point = transform.pixelPoint(fromView: convert(event.locationInWindow, from: nil), clamped: true) else { return }
-        session.pointerUp(at: point)
+        session.pointerUp(at: point, windowPoint: event.locationInWindow)
         needsDisplay = true
     }
 

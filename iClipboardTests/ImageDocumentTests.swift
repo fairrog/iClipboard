@@ -784,4 +784,25 @@ final class ImageDocumentTests: XCTestCase {
         XCTAssertEqual(phases.last, .ended)
         XCTAssertTrue(session.document.annotations.isEmpty)
     }
+
+    func testBackgroundDragUsesStableWindowDeltaWhileCanvasMoves() throws {
+        // A Retina-like fixture: one view point covers two source pixels.
+        let session = ImageEditorSession(image: try image(width: 240, height: 160))
+        session.tool = .select
+        var deltas: [CGSize] = []
+        session.canvasBackgroundDragAction = { phase in
+            if case let .changed(delta) = phase { deltas.append(delta) }
+        }
+
+        session.pointerDown(at: CGPoint(x: 120, y: 80), tolerance: 1, clickCount: 1,
+                            windowPoint: CGPoint(x: 100, y: 100))
+        session.pointerDragged(to: CGPoint(x: 80, y: 60),
+                               windowPoint: CGPoint(x: 130, y: 120))
+        session.pointerUp(at: CGPoint(x: 80, y: 60),
+                          windowPoint: CGPoint(x: 160, y: 140))
+
+        XCTAssertEqual(deltas.last, CGSize(width: 60, height: 40),
+                       "Window deltas must not change when the canvas itself moves")
+        XCTAssertTrue(session.document.annotations.isEmpty)
+    }
 }

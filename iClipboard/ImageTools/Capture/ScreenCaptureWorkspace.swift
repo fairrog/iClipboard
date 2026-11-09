@@ -417,7 +417,6 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             draggedImageOrigin = imageRect.origin
         case let .changed(delta):
             guard let origin = draggedImageOrigin else { return }
-            let delta = canvas.transform.viewDelta(fromPixel: delta)
             let maxX = bounds.maxX - imageRect.width
             let maxY = bounds.maxY - imageRect.height
             let x = min(max(bounds.minX, origin.x + delta.width), maxX)

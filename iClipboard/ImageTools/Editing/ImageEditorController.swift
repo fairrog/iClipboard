@@ -204,6 +204,7 @@ final class ImageEditorSession: ObservableObject {
     private var resizingAnnotation: ImageAnnotation?
     private var resizingHandle: ImageAnnotationHandle?
     private var backgroundDragStart: CGPoint?
+    private var backgroundDragStartWindow: CGPoint?
     private var isDraggingBackground = false
     private var textAnchor: CGPoint?
     private var editingTextID: UUID?
@@ -312,7 +313,8 @@ final class ImageEditorSession: ObservableObject {
         syncMosaicSelection(id: document.selectedID, annotations: document.annotations)
     }
 
-    func pointerDown(at point: CGPoint, tolerance: CGFloat, clickCount: Int) {
+    func pointerDown(at point: CGPoint, tolerance: CGFloat, clickCount: Int,
+                     windowPoint: CGPoint? = nil) {
         guard isInputEnabled else { return }
         cancelGesture()
         switch tool {
@@ -345,7 +347,10 @@ final class ImageEditorSession: ObservableObject {
             document.selectedID = annotation?.id
             if let annotation { style = annotation.style }
             movingAnnotation = annotation
-            if annotation == nil { backgroundDragStart = point }
+            if annotation == nil {
+                backgroundDragStart = point
+                backgroundDragStartWindow = windowPoint
+            }
             startPoint = point
         case .text:
             beginText(at: point, annotation: nil)
@@ -364,7 +369,7 @@ final class ImageEditorSession: ObservableObject {
         }
     }
 
-    func pointerDragged(to point: CGPoint) {
+    func pointerDragged(to point: CGPoint, windowPoint: CGPoint? = nil) {
         guard isInputEnabled else { return }
         if tool == .eyedropper { sample(at: point); return }
         guard let startPoint else { return }
@@ -378,8 +383,17 @@ final class ImageEditorSession: ObservableObject {
             return
         }
         if let backgroundDragStart {
-            let delta = CGSize(width: point.x - backgroundDragStart.x,
+            // The canvas frame moves while the screenshot is dragged. Pixel
+            // coordinates are relative to that moving frame, so they cancel the
+            // motion and make the drag stick. Window points are stable.
+            let delta: CGSize
+            if let start = backgroundDragStartWindow, let windowPoint {
+                delta = CGSize(width: windowPoint.x - start.x,
+                               height: windowPoint.y - start.y)
+            } else {
+                delta = CGSize(width: point.x - backgroundDragStart.x,
                                height: point.y - backgroundDragStart.y)
+            }
             if !isDraggingBackground,
                hypot(delta.width, delta.height) > 3 {
                 isDraggingBackground = true
@@ -412,9 +426,9 @@ final class ImageEditorSession: ObservableObject {
         if pixelsInvalidated { renderPreview() }
     }
 
-    func pointerUp(at point: CGPoint) {
+    func pointerUp(at point: CGPoint, windowPoint: CGPoint? = nil) {
         guard isInputEnabled, startPoint != nil else { return }
-        pointerDragged(to: point)
+        pointerDragged(to: point, windowPoint: windowPoint)
         if isDraggingBackground {
             canvasBackgroundDragAction?(.ended)
             clearGestureState()
@@ -556,6 +570,7 @@ final class ImageEditorSession: ObservableObject {
         resizingAnnotation = nil
         resizingHandle = nil
         backgroundDragStart = nil
+        backgroundDragStartWindow = nil
         isDraggingBackground = false
         previewAnnotation = nil
         isAdjustingMosaic = false
