@@ -156,6 +156,12 @@ enum ImageEditorTool: String, CaseIterable, Identifiable {
 
 @MainActor
 final class ImageEditorSession: ObservableObject {
+    enum CanvasDragPhase: Equatable {
+        case began
+        case changed(CGSize)
+        case ended
+    }
+
     let document: ImageDocument
     @Published var tool: ImageEditorTool = .arrow {
         didSet { if tool != oldValue { cancelGesture() } }
@@ -187,6 +193,9 @@ final class ImageEditorSession: ObservableObject {
     /// A double-click on empty canvas is the fast copy path. Text labels keep
     /// their double-click-to-edit behaviour and never reach this callback.
     var doubleClickAction: (() -> Void)?
+    /// Select-tool drags on blank canvas move the whole captured image instead
+    /// of drawing. The workspace clamps the delta and keeps its own origin.
+    var canvasBackgroundDragAction: ((CanvasDragPhase) -> Void)?
 
     private var flattenedImage: CGImage
     private var subscriptions = Set<AnyCancellable>()
@@ -194,6 +203,8 @@ final class ImageEditorSession: ObservableObject {
     private var movingAnnotation: ImageAnnotation?
     private var resizingAnnotation: ImageAnnotation?
     private var resizingHandle: ImageAnnotationHandle?
+    private var backgroundDragStart: CGPoint?
+    private var isDraggingBackground = false
     private var textAnchor: CGPoint?
     private var editingTextID: UUID?
     private var lastPreviewTime: TimeInterval = 0
@@ -334,6 +345,7 @@ final class ImageEditorSession: ObservableObject {
             document.selectedID = annotation?.id
             if let annotation { style = annotation.style }
             movingAnnotation = annotation
+            if annotation == nil { backgroundDragStart = point }
             startPoint = point
         case .text:
             beginText(at: point, annotation: nil)
@@ -365,6 +377,19 @@ final class ImageEditorSession: ObservableObject {
             if pixelsInvalidated { renderPreview() }
             return
         }
+        if let backgroundDragStart {
+            let delta = CGSize(width: point.x - backgroundDragStart.x,
+                               height: point.y - backgroundDragStart.y)
+            if !isDraggingBackground,
+               hypot(delta.width, delta.height) > 3 {
+                isDraggingBackground = true
+                canvasBackgroundDragAction?(.began)
+            }
+            if isDraggingBackground {
+                canvasBackgroundDragAction?(.changed(delta))
+            }
+            return
+        }
         let annotation: ImageAnnotation
         if let movingAnnotation {
             let delta = CGSize(width: point.x - startPoint.x, height: point.y - startPoint.y)
@@ -390,6 +415,12 @@ final class ImageEditorSession: ObservableObject {
     func pointerUp(at point: CGPoint) {
         guard isInputEnabled, startPoint != nil else { return }
         pointerDragged(to: point)
+        if isDraggingBackground {
+            canvasBackgroundDragAction?(.ended)
+            clearGestureState()
+            finishPixelChange()
+            return
+        }
         let annotation = previewAnnotation
         let original = movingAnnotation ?? resizingAnnotation
         clearGestureState()
@@ -405,6 +436,7 @@ final class ImageEditorSession: ObservableObject {
     /// Discard only the uncommitted gesture. A no-op cancel emits nothing;
     /// an invalidated preview restores the same revision and emits one DidChange.
     func cancelGesture() {
+        if isDraggingBackground { canvasBackgroundDragAction?(.ended) }
         let wasAdjustingMosaic = isAdjustingMosaic
         clearGestureState()
         if wasAdjustingMosaic { syncMosaicSelection(id: document.selectedID, annotations: document.annotations) }
@@ -523,6 +555,8 @@ final class ImageEditorSession: ObservableObject {
         movingAnnotation = nil
         resizingAnnotation = nil
         resizingHandle = nil
+        backgroundDragStart = nil
+        isDraggingBackground = false
         previewAnnotation = nil
         isAdjustingMosaic = false
         mosaicAdjustmentAnnotation = nil

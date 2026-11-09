@@ -135,6 +135,33 @@ final class InlineCaptureTests: XCTestCase {
         _ = try await task.value
     }
 
+    func testDraggingBlankCanvasMovesCropAndUpdatesPinAnchor() async throws {
+        var pinnedAnchor: CGRect?
+        let (capture, task, panel) = try await startCapture { action in
+            if case let .pinImage(_, anchor) = action { pinnedAnchor = anchor }
+            return .completed
+        }
+        defer { capture.cancel() }
+        try drag(panel, from: CGPoint(x: 180, y: 200), to: CGPoint(x: 480, y: 400))
+        let workspace = try XCTUnwrap(panel.workspace)
+        let before = workspace.imageRect
+
+        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 240, y: 280))
+        try mouse(panel, type: .leftMouseDragged, at: CGPoint(x: 300, y: 340))
+        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 300, y: 340))
+
+        XCTAssertEqual(workspace.imageRect, before.offsetBy(dx: 60, dy: 60))
+        XCTAssertEqual(workspace.canvas.frame, workspace.imageRect)
+        XCTAssertEqual(workspace.session.document.annotations, [])
+
+        workspace.requestImageAction(.pin)
+        let result = try await task.value
+        guard case .completed? = result else {
+            return XCTFail("Pin should finish the moved capture")
+        }
+        XCTAssertEqual(pinnedAnchor, CGRect(x: 240, y: 260, width: 300, height: 200))
+    }
+
     func testEscapeBeforeAnySelectionClosesOverlayWithoutMouseFocus() async throws {
         let (capture, task, panel) = try await startCapture()
         defer { capture.cancel() }

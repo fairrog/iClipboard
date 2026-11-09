@@ -98,6 +98,10 @@ final class ScreenCaptureOverlayPanel: NSPanel {
         captureView?.setDetectionCandidate(candidate)
     }
 
+    func setSelection(_ rect: CGRect?) {
+        captureView?.setSelection(rect)
+    }
+
     private func pixelSample(at globalPoint: CGPoint) -> (image: ToolImage, point: CGPoint)? {
         guard frame.contains(globalPoint), let captureView else { return nil }
         if let workspace {
@@ -156,6 +160,10 @@ final class ScreenCaptureOverlayPanel: NSPanel {
         workspace.onSamplePixel = { [weak self] event in self?.samplePixel(with: event) }
         workspace.onPointerChanged = { [weak self] point, flags in self?.updatePixelPreview(at: point, modifiers: flags) }
         workspace.onPointerExited = { [weak self] in self?.hidePixelPreview() }
+        workspace.onImageMoved = { [weak self, weak workspace] rect in
+            guard let self, let workspace, let captureView = self.captureView else { return }
+            captureView.setSelection(captureView.convert(rect, from: workspace))
+        }
         self.workspace = workspace
         captureView.setDetectionCandidate(nil)
         hudHoldTask?.cancel()
@@ -358,6 +366,11 @@ private final class ScreenCaptureOverlayView: NSView {
     func setDetectionCandidate(_ candidate: CaptureDetectionCandidate?) {
         guard !editingLocked, drag == nil, detectionCandidate != candidate else { return }
         detectionCandidate = candidate
+        needsDisplay = true
+    }
+
+    func setSelection(_ rect: CGRect?) {
+        selection = rect
         needsDisplay = true
     }
 

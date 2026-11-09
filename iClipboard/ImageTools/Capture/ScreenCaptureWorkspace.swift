@@ -72,7 +72,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     let session: ImageEditorSession
     let canvas: ImageEditorCanvasView
     let textInteraction: InlineImageTextInteraction
-    let imageRect: CGRect
+    private(set) var imageRect: CGRect
     private(set) var toolbarFrame = CGRect.zero
     private(set) var isBusy = false
     var onAction: ((ScreenCaptureAction) -> Void)?
@@ -84,12 +84,14 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     /// The panel owns source selection, Option gating, sampling, and HUD lifetime.
     var onPointerChanged: ((CGPoint, NSEvent.ModifierFlags) -> Void)?
     var onPointerExited: (() -> Void)?
+    var onImageMoved: ((CGRect) -> Void)?
 
     private var pointerTrackingArea: NSTrackingArea?
     private var pointerLocationInWindow: CGPoint?
     private let anchor: CGRect
-    private let selectionReleasePoint: CGPoint?
+    private var selectionReleasePoint: CGPoint?
     private var toolbarOrigin: CGPoint?
+    private var draggedImageOrigin: CGPoint?
     private let strip = CaptureToolbarStrip()
     private let controls = NSStackView()
     private let status = NSTextField(labelWithString: "")
@@ -115,6 +117,9 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     private var isInvalidated = false
     private(set) var canvasCursorInvalidationCount = 0
     var statusText: String { status.stringValue }
+    private var currentAnchor: CGRect {
+        window?.convertToScreen(imageRect) ?? anchor
+    }
 
     init(image: ToolImage, imageRect: CGRect, anchor: CGRect, bounds: CGRect,
          releasePoint: CGPoint? = nil, textInteraction injectedInteraction: InlineImageTextInteraction? = nil) {
@@ -132,6 +137,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         layer?.backgroundColor = NSColor.clear.cgColor
         session.tool = .select
         session.doubleClickAction = { [weak self] in self?.requestImageAction(.copy) }
+        session.canvasBackgroundDragAction = { [weak self] phase in self?.handleCanvasDrag(phase) }
         canvas.frame = imageRect
         // The editor paints dirtyRect for its scrollable canvas. Constrain that
         // painting to this exact crop when embedded in a full-screen overlay.
@@ -331,6 +337,8 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         onPointerExited?()
         onPointerChanged = nil
         onPointerExited = nil
+        onImageMoved = nil
+        draggedImageOrigin = nil
         if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
         pointerTrackingArea = nil
         feedbackTask?.cancel()
@@ -343,6 +351,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         textInteraction.onWillCopySelection = nil
         session.onPixelsWillChange = nil
         session.onPixelsDidChange = nil
+        session.canvasBackgroundDragAction = nil
         subscriptions.removeAll()
         popover?.close()
         popover = nil
@@ -400,6 +409,44 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
 
     override func keyDown(with event: NSEvent) {
         if !handleKey(event) { super.keyDown(with: event) }
+    }
+
+    private func handleCanvasDrag(_ phase: ImageEditorSession.CanvasDragPhase) {
+        switch phase {
+        case .began:
+            draggedImageOrigin = imageRect.origin
+        case let .changed(delta):
+            guard let origin = draggedImageOrigin else { return }
+            let delta = canvas.transform.viewDelta(fromPixel: delta)
+            let maxX = bounds.maxX - imageRect.width
+            let maxY = bounds.maxY - imageRect.height
+            let x = min(max(bounds.minX, origin.x + delta.width), maxX)
+            let y = min(max(bounds.minY, origin.y + delta.height), maxY)
+            let applied = CGSize(width: x - imageRect.minX, height: y - imageRect.minY)
+            guard applied.width != 0 || applied.height != 0 else { return }
+            imageRect.origin = CGPoint(x: x, y: y)
+            selectionReleasePoint = selectionReleasePoint.map {
+                CGPoint(x: $0.x + applied.width, y: $0.y + applied.height)
+            }
+            if let toolbarOrigin {
+                self.toolbarOrigin = CGPoint(x: toolbarOrigin.x + applied.width,
+                                             y: toolbarOrigin.y + applied.height)
+            }
+            layoutImage()
+        case .ended:
+            draggedImageOrigin = nil
+        }
+    }
+
+    private func layoutImage() {
+        canvas.frame = imageRect
+        textInteraction.frame = imageRect
+        canvas.transform = ImageCanvasTransform(pixelSize: session.document.original.pixelSize,
+                                                exactViewSize: imageRect.size)
+        canvas.needsDisplay = true
+        window?.invalidateCursorRects(for: canvas)
+        layoutWorkspace()
+        onImageMoved?(imageRect)
     }
 
     /// Capture-level double-click routing also covers Live Text, which owns its
@@ -495,7 +542,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             inputStyle = session.style
             layoutTextInput()
         }
-        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
+        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 拖动空白移动截图 · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
         status.textColor = errorMessage == nil && session.errorMessage == nil ? .secondaryLabelColor : .systemRed
         status.toolTip = status.stringValue
     }
@@ -624,7 +671,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         onAction?(.translateRecognizedText({ [weak self] in
             guard let self else { throw CancellationError() }
             return try await self.currentRecognizedText()
-        }, anchor))
+        }, currentAnchor))
     }
 
     private func currentRecognizedText() async throws -> String {
@@ -647,7 +694,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             switch action {
             case .copy: onAction?(.copyImage(image))
             case .save: onAction?(.saveImage(image))
-            case .pin: onAction?(.pinImage(image, anchor))
+            case .pin: onAction?(.pinImage(image, currentAnchor))
             }
         } catch { showError(error.localizedDescription) }
     }

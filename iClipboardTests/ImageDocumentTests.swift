@@ -763,4 +763,25 @@ final class ImageDocumentTests: XCTestCase {
         session.pointerUp(at: CGPoint(x: 100, y: 70))
         XCTAssertEqual(session.document.annotations, [annotation])
     }
+
+    func testBlankSelectDragMovesImageWithoutCreatingAnnotation() throws {
+        let session = ImageEditorSession(image: try image(width: 120, height: 80))
+        session.tool = .select
+        var phases: [ImageEditorSession.CanvasDragPhase] = []
+        session.canvasBackgroundDragAction = { phases.append($0) }
+
+        session.pointerDown(at: CGPoint(x: 60, y: 40), tolerance: 1, clickCount: 1)
+        session.pointerDragged(to: CGPoint(x: 70, y: 45))
+        session.pointerDragged(to: CGPoint(x: 80, y: 50))
+        session.pointerUp(at: CGPoint(x: 80, y: 50))
+
+        let changes = phases.compactMap { phase -> CGSize? in
+            guard case let .changed(delta) = phase else { return nil }
+            return delta
+        }
+        XCTAssertEqual(phases.first, .began)
+        XCTAssertEqual(changes.last, CGSize(width: 20, height: 10))
+        XCTAssertEqual(phases.last, .ended)
+        XCTAssertTrue(session.document.annotations.isEmpty)
+    }
 }
