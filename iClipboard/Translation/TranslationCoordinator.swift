@@ -75,6 +75,7 @@ final class TranslationCoordinator {
             self?.cancelTranslation()
             self?.pendingSelection = nil
             self?.presentationSource = nil
+            self?.manualDismissOnOutsideClick = false
         }
         existingPanelController = controller
         if !presentationSuspensions.isEmpty {
@@ -89,6 +90,7 @@ final class TranslationCoordinator {
     private var pendingSelection: SelectedTextContext?
     // This belongs to the result, not the latest (possibly pinned-out) selection.
     private var presentationSource: Source?
+    private var manualDismissOnOutsideClick = false
     private var generation = UUID()
     private var didStart = false
     private var monitoringRequested = false
@@ -118,6 +120,7 @@ final class TranslationCoordinator {
             self.pendingSelection = nil
             self.existingPanelController?.dismissTransientSurfaces(
                 preservingResult: self.presentationSource == .manual
+                    && !self.manualDismissOnOutsideClick
             )
         }
 
@@ -165,23 +168,28 @@ final class TranslationCoordinator {
         cancelTranslation()
         pendingSelection = nil
         presentationSource = nil
+        manualDismissOnOutsideClick = false
         selectionMonitor.stop()
         existingPanelController?.hide()
         cancellables.removeAll()
         didStart = false
     }
 
-    /// Explicit translation (for example, OCR) does not require selection monitoring or AX access.
+    /// Explicit translation (for example, OCR or a captured screenshot) does not
+    /// require selection monitoring or Accessibility access.
     func translate(
         text: String,
-        anchor: CGRect = CGRect(origin: NSEvent.mouseLocation, size: CGSize(width: 1, height: 1))
+        anchor: CGRect = CGRect(origin: NSEvent.mouseLocation, size: CGSize(width: 1, height: 1)),
+        sourceName: String = "手动翻译",
+        dismissOnOutsideClick: Bool = false
     ) {
+        manualDismissOnOutsideClick = dismissOnOutsideClick
         pendingSelection = nil
         let context = SelectedTextContext(
             text: text,
             anchorRect: anchor,
             cursorPoint: CGPoint(x: anchor.midX, y: anchor.midY),
-            sourceApplicationName: "手动翻译",
+            sourceApplicationName: sourceName,
             sourceBundleIdentifier: nil
         )
         startTranslation(context, source: .manual)
@@ -247,7 +255,9 @@ final class TranslationCoordinator {
             selectionMonitor.stop()
             pendingSelection = nil
             if presentationSource == .manual {
-                existingPanelController?.dismissTransientSurfaces(preservingResult: true)
+                existingPanelController?.dismissTransientSurfaces(
+                    preservingResult: !manualDismissOnOutsideClick
+                )
             } else {
                 cancelTranslation()
                 existingPanelController?.hide()
@@ -315,6 +325,7 @@ final class TranslationCoordinator {
             context: context,
             provider: provider,
             dismissOnOutsideClick: source == .selection
+                || (source == .manual && manualDismissOnOutsideClick)
         )
 
         translationTask = Task { [weak self] in

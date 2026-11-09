@@ -149,6 +149,22 @@ final class TranslationCoordinatorTests: XCTestCase {
         await waitFor { if case .translated = fixture.panel.viewModel.phase { return true }; return false }
     }
 
+    func testScreenshotTranslationCarriesItsOwnSourceName() async {
+        let fixture = Fixture()
+        defer { fixture.dispose() }
+        fixture.coordinator.translate(
+            text: "captured text",
+            anchor: anchor,
+            sourceName: "截图翻译",
+            dismissOnOutsideClick: true
+        )
+        await waitFor { await fixture.client.requests.count == 1 }
+        XCTAssertEqual(fixture.panel.viewModel.presentation?.context.sourceApplicationName, "截图翻译")
+        XCTAssertEqual(fixture.panel.viewModel.presentation?.context.text, "captured text")
+        await fixture.client.finish()
+        await waitFor { if case .translated = fixture.panel.viewModel.phase { return true }; return false }
+    }
+
     func testMissingManualCredentialsShowNormalErrorWithoutCallingClient() async {
         let fixture = Fixture()
         defer { fixture.dispose() }

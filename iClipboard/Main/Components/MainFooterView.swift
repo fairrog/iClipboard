@@ -37,6 +37,7 @@ struct MainFooterView: View {
 
             Menu {
                 Button("区域截图…") { onImageCommand(.capture) }
+                Button("截图翻译…") { onImageCommand(.translateCapture) }
                 Button("贴出剪贴板图片") { onImageCommand(.pinClipboard) }
             } label: {
                 Image(systemName: "viewfinder")

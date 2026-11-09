@@ -80,9 +80,9 @@ final class InlineCaptureTests: XCTestCase {
         XCTAssertNil(workspace.canvas.enclosingScrollView)
         XCTAssertEqual(workspace.window?.windowNumber, windowNumber)
         XCTAssertEqual(visibleWindowNumbers().subtracting(initialWindows), Set([windowNumber]))
-        // Double-click now belongs to text/annotation selection, never crop finish.
-        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 240, y: 280), clickCount: 2)
-        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 240, y: 280), clickCount: 2)
+        // A plain click deselects but keeps the in-place workspace alive.
+        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 240, y: 280))
+        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 240, y: 280))
         XCTAssertTrue(panel.workspace === workspace)
         XCTAssertEqual(capture.capturePanels.count, 1)
         try drag(panel, from: CGPoint(x: 600, y: 450), to: CGPoint(x: 700, y: 500))
@@ -92,6 +92,47 @@ final class InlineCaptureTests: XCTestCase {
         XCTAssertNil(result)
         XCTAssertFalse(panel.isVisible)
         XCTAssertTrue(capture.capturePanels.isEmpty)
+    }
+
+    func testDoubleClickOnCanvasCopiesCropAndFinishesCapture() async throws {
+        let (capture, task, panel) = try await startCapture()
+        defer { capture.cancel() }
+        try drag(panel, from: CGPoint(x: 180, y: 200), to: CGPoint(x: 480, y: 400))
+        XCTAssertNotNil(panel.workspace)
+        try mouse(panel, type: .leftMouseDown, at: CGPoint(x: 240, y: 280), clickCount: 2)
+        try mouse(panel, type: .leftMouseUp, at: CGPoint(x: 240, y: 280), clickCount: 2)
+        let result = try await task.value
+        guard case let .image(image, anchor)? = result else {
+            return XCTFail("Double-click must copy the current crop")
+        }
+        XCTAssertEqual(image.pixelSize, CGSize(width: 300, height: 200))
+        XCTAssertEqual(anchor, CGRect(x: 180, y: 200, width: 300, height: 200))
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertTrue(capture.capturePanels.isEmpty)
+    }
+
+    func testDoubleClickOnTextAnnotationEditsInsteadOfCopying() async throws {
+        var copied = 0
+        let (capture, task, panel) = try await startCapture { action in
+            if case .copyImage = action { copied += 1 }
+            return .completed
+        }
+        defer { capture.cancel() }
+        try drag(panel, from: CGPoint(x: 180, y: 200), to: CGPoint(x: 480, y: 400))
+        let workspace = try XCTUnwrap(panel.workspace)
+        let annotation = ImageAnnotation(kind: .text, points: [CGPoint(x: 20, y: 20)],
+                                         text: "Label", textSize: CGSize(width: 80, height: 30))
+        workspace.session.document.add(annotation)
+        workspace.session.tool = .select
+        let canvasPoint = workspace.canvas.transform.viewPoint(fromPixel:
+            CGPoint(x: annotation.bounds.midX, y: annotation.bounds.midY))
+        let windowPoint = workspace.canvas.convert(canvasPoint, to: nil)
+        try mouse(panel, type: .leftMouseDown, at: windowPoint, clickCount: 2)
+        try mouse(panel, type: .leftMouseUp, at: windowPoint, clickCount: 2)
+        XCTAssertTrue(workspace.session.isEditingText)
+        XCTAssertEqual(copied, 0)
+        capture.cancel()
+        _ = try await task.value
     }
 
     func testEscapeBeforeAnySelectionClosesOverlayWithoutMouseFocus() async throws {

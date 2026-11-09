@@ -110,6 +110,141 @@ struct ImageAnnotation: Identifiable, Equatable {
     }
 }
 
+enum ImageAnnotationHandle: Equatable {
+    case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
+    case start, end
+}
+
+extension ImageAnnotation {
+    /// Pixel-space handles for the current selection. Open strokes expose their
+    /// endpoints; text keeps its dedicated double-click editor instead of boxes.
+    var resizeHandles: [(handle: ImageAnnotationHandle, point: CGPoint)] {
+        switch kind {
+        case .text:
+            return []
+        case .line, .arrow:
+            guard points.count > 1, let first = points.first, let last = points.last else { return [] }
+            return [(.start, first), (.end, last)]
+        case .rectangle, .ellipse, .mosaic, .brush:
+            let rect = bounds
+            guard rect.width >= 1 || rect.height >= 1 else { return [] }
+            return [
+                (.topLeft, CGPoint(x: rect.minX, y: rect.minY)),
+                (.top, CGPoint(x: rect.midX, y: rect.minY)),
+                (.topRight, CGPoint(x: rect.maxX, y: rect.minY)),
+                (.right, CGPoint(x: rect.maxX, y: rect.midY)),
+                (.bottomRight, CGPoint(x: rect.maxX, y: rect.maxY)),
+                (.bottom, CGPoint(x: rect.midX, y: rect.maxY)),
+                (.bottomLeft, CGPoint(x: rect.minX, y: rect.maxY)),
+                (.left, CGPoint(x: rect.minX, y: rect.midY))
+            ]
+        }
+    }
+
+    /// Resize without changing the opposite edge/corner. All inputs and outputs
+    /// are source pixels, matching the rest of the annotation document.
+    func resized(handle: ImageAnnotationHandle, to point: CGPoint,
+                 constrainedTo imageSize: CGSize) -> ImageAnnotation {
+        let clamped = CGPoint(x: min(max(0, point.x), imageSize.width),
+                              y: min(max(0, point.y), imageSize.height))
+        var copy = self
+        switch handle {
+        case .start:
+            guard points.count > 1, let other = points.last,
+                  hypot(clamped.x - other.x, clamped.y - other.y) >= 1 else { return self }
+            copy.points[0] = clamped
+        case .end:
+            guard points.count > 1, let other = points.first,
+                  hypot(clamped.x - other.x, clamped.y - other.y) >= 1 else { return self }
+            copy.points[points.count - 1] = clamped
+        default:
+            guard let rect = resizedBounds(using: handle, to: clamped, imageSize: imageSize),
+                  rect != bounds else { return self }
+            copy.applyBounds(rect)
+        }
+        return copy
+    }
+
+    private func resizedBounds(using handle: ImageAnnotationHandle, to point: CGPoint,
+                               imageSize: CGSize) -> CGRect? {
+        let original = bounds
+        var minX = original.minX
+        var maxX = original.maxX
+        var minY = original.minY
+        var maxY = original.maxY
+        var movesLeft = false
+        var movesRight = false
+        var movesTop = false
+        var movesBottom = false
+
+        switch handle {
+        case .topLeft:
+            minX = point.x; minY = point.y; movesLeft = true; movesTop = true
+        case .top:
+            minY = point.y; movesTop = true
+        case .topRight:
+            maxX = point.x; minY = point.y; movesRight = true; movesTop = true
+        case .right:
+            maxX = point.x; movesRight = true
+        case .bottomRight:
+            maxX = point.x; maxY = point.y; movesRight = true; movesBottom = true
+        case .bottom:
+            maxY = point.y; movesBottom = true
+        case .bottomLeft:
+            minX = point.x; maxY = point.y; movesLeft = true; movesBottom = true
+        case .left:
+            minX = point.x; movesLeft = true
+        case .start, .end:
+            return nil
+        }
+
+        let minimum: CGFloat = 1
+        if maxX - minX < minimum {
+            if movesLeft { minX = maxX - minimum }
+            if movesRight { maxX = minX + minimum }
+            if !movesLeft && !movesRight { maxX = minX + minimum }
+        }
+        if maxY - minY < minimum {
+            if movesTop { minY = maxY - minimum }
+            if movesBottom { maxY = minY + minimum }
+            if !movesTop && !movesBottom { maxY = minY + minimum }
+        }
+
+        minX = max(0, min(minX, imageSize.width - minimum))
+        maxX = min(imageSize.width, max(maxX, minX + minimum))
+        minY = max(0, min(minY, imageSize.height - minimum))
+        maxY = min(imageSize.height, max(maxY, minY + minimum))
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private mutating func applyBounds(_ rect: CGRect) {
+        let original = bounds
+        points = points.map { point in
+            let x: CGFloat
+            if original.width > 0 {
+                x = rect.minX + (point.x - original.minX) * (rect.width / original.width)
+            } else {
+                // A zero-width brush cannot be widened by scaling existing x
+                // values; keep the stroke centered in the resized box.
+                x = rect.midX
+            }
+            let y: CGFloat
+            if original.height > 0 {
+                y = rect.minY + (point.y - original.minY) * (rect.height / original.height)
+            } else {
+                y = rect.midY
+            }
+            return CGPoint(x: x, y: y)
+        }
+        if kind == .text {
+            let scaleX = original.width > 0 ? rect.width / original.width : 1
+            let scaleY = original.height > 0 ? rect.height / original.height : 1
+            textSize = CGSize(width: max(1, textSize.width * scaleX),
+                              height: max(1, textSize.height * scaleY))
+        }
+    }
+}
+
 /// History stores only value annotations, never a bitmap per undo step.
 @MainActor
 final class ImageDocument: ObservableObject {

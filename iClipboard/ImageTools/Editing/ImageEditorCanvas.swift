@@ -60,6 +60,7 @@ final class ImageEditorCanvasView: NSView {
     var selectionColor = NSColor.controlAccentColor
     var checkerLight = NSColor.windowBackgroundColor
     var checkerDark = NSColor.controlBackgroundColor
+    private var pointerTrackingArea: NSTrackingArea?
 
     init(session: ImageEditorSession) {
         self.session = session
@@ -67,7 +68,7 @@ final class ImageEditorCanvasView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
         setAccessibilityLabel("图片编辑画布")
-        setAccessibilityHelp("使用工具栏选择工具，在图片上拖动绘制。选择模式中 Delete 删除，方向键移动，Escape 取消操作。")
+        setAccessibilityHelp("使用工具栏选择工具，在图片上拖动绘制。选择模式中拖动标注或手柄调整大小，Delete 删除，方向键移动，Escape 取消操作。")
     }
 
     required init?(coder: NSCoder) { nil }
@@ -104,6 +105,7 @@ final class ImageEditorCanvasView: NSView {
         NSGraphicsContext.restoreGraphicsState()
         if let bounds = session.selectionBounds {
             strokeSelection(transform.viewRect(fromPixel: bounds))
+            drawSelectionHandles()
         }
     }
 
@@ -113,6 +115,53 @@ final class ImageEditorCanvasView: NSView {
         path.setLineDash([4, 3], count: 2, phase: 0)
         selectionColor.setStroke()
         path.stroke()
+    }
+
+    private func drawSelectionHandles() {
+        for item in session.selectionHandles {
+            let point = transform.viewPoint(fromPixel: item.point)
+            let rect = CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)
+            NSColor.white.setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5)
+            path.fill()
+            selectionColor.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseMoved, .cursorUpdate, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        pointerTrackingArea = area
+        addTrackingArea(area)
+    }
+
+    override func mouseMoved(with event: NSEvent) { updatePointerCursor(event) }
+    override func cursorUpdate(with event: NSEvent) { updatePointerCursor(event) }
+
+    private func updatePointerCursor(_ event: NSEvent) {
+        guard session.isInputEnabled else { NSCursor.arrow.set(); return }
+        let location = convert(event.locationInWindow, from: nil)
+        guard let pixel = transform.pixelPoint(fromView: location) else {
+            (session.tool == .select ? NSCursor.arrow : NSCursor.crosshair).set()
+            return
+        }
+        if session.tool == .select {
+            let tolerance = 7 / transform.scale
+            if session.selectionHandle(at: pixel, tolerance: tolerance) != nil {
+                NSCursor.crosshair.set()
+            } else if session.document.annotation(at: pixel, tolerance: tolerance) != nil {
+                NSCursor.openHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        } else {
+            NSCursor.crosshair.set()
+        }
     }
 
     override func resetCursorRects() {

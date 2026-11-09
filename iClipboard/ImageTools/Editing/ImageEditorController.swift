@@ -30,6 +30,7 @@ final class ImageEditorController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         window.contentView = NSHostingView(rootView: ImageEditorView(session: session))
         session.copyAction = { [weak self] in self?.sendImage(to: self?.onCopy) }
+        session.doubleClickAction = { [weak self] in self?.sendImage(to: self?.onCopy) }
         session.saveAction = { [weak self] in self?.requestSave() }
         session.pinAction = { [weak self] in self?.sendImage(to: self?.onPin) }
         session.copyColorAction = { [weak self] color in self?.onCopyColor?(color) }
@@ -144,7 +145,7 @@ enum ImageEditorTool: String, CaseIterable, Identifiable {
     var annotationKind: ImageAnnotation.Kind? { ImageAnnotation.Kind(rawValue: rawValue) }
     var hint: String {
         switch self {
-        case .select: return "单击选中，拖动移动；Delete 删除；双击文字修改内容。"
+        case .select: return "单击选中，拖动移动；拖白色手柄调整大小/端点；双击空白复制；双击文字修改；Delete 删除。"
         case .text: return "单击画布输入文字；支持换行，确认后成为可移动标注。"
         case .eyedropper: return "单击或拖动读取当前扁平图像的像素颜色。"
         case .mosaic: return "拖出区域将实际像素马赛克化；区域外图像不受影响。"
@@ -183,11 +184,16 @@ final class ImageEditorSession: ObservableObject {
     var saveAction: (() -> Void)?
     var pinAction: (() -> Void)?
     var copyColorAction: ((SampledImageColor) -> Void)?
+    /// A double-click on empty canvas is the fast copy path. Text labels keep
+    /// their double-click-to-edit behaviour and never reach this callback.
+    var doubleClickAction: (() -> Void)?
 
     private var flattenedImage: CGImage
     private var subscriptions = Set<AnyCancellable>()
     private var startPoint: CGPoint?
     private var movingAnnotation: ImageAnnotation?
+    private var resizingAnnotation: ImageAnnotation?
+    private var resizingHandle: ImageAnnotationHandle?
     private var textAnchor: CGPoint?
     private var editingTextID: UUID?
     private var lastPreviewTime: TimeInterval = 0
@@ -219,6 +225,17 @@ final class ImageEditorSession: ObservableObject {
     var selectionBounds: CGRect? {
         if let previewAnnotation { return previewAnnotation.visualBounds }
         return document.selectedAnnotation?.visualBounds
+    }
+
+    var selectionHandles: [(handle: ImageAnnotationHandle, point: CGPoint)] {
+        (previewAnnotation ?? document.selectedAnnotation)?.resizeHandles ?? []
+    }
+
+    func selectionHandle(at point: CGPoint, tolerance: CGFloat) -> ImageAnnotationHandle? {
+        let candidates = selectionHandles
+            .map { (handle: $0.handle, distance: hypot($0.point.x - point.x, $0.point.y - point.y)) }
+            .filter { $0.distance <= tolerance }
+        return candidates.min(by: { $0.distance < $1.distance })?.handle
     }
 
     func changeStyle(_ change: (inout ImageAnnotationStyle) -> Void) {
@@ -289,15 +306,35 @@ final class ImageEditorSession: ObservableObject {
         cancelGesture()
         switch tool {
         case .select:
+            // Double-click is the fast copy path. Text labels keep their editor,
+            // and this check runs before handles so a double-click never starts
+            // a resize instead of copying.
+            if clickCount > 1 {
+                if let annotation = document.annotation(at: point, tolerance: tolerance),
+                   annotation.kind == .text {
+                    document.selectedID = annotation.id
+                    style = annotation.style
+                    beginText(at: annotation.points.first ?? point, annotation: annotation)
+                } else {
+                    doubleClickAction?()
+                }
+                return
+            }
+            // Handles take precedence over moving the whole annotation, but only
+            // the currently selected annotation draws them.
+            if let selected = document.selectedAnnotation,
+               let handle = selectionHandle(at: point, tolerance: tolerance) {
+                style = selected.style
+                resizingAnnotation = selected
+                resizingHandle = handle
+                startPoint = point
+                return
+            }
             let annotation = document.annotation(at: point, tolerance: tolerance)
             document.selectedID = annotation?.id
             if let annotation { style = annotation.style }
-            if clickCount > 1, let annotation, annotation.kind == .text {
-                beginText(at: annotation.points.first ?? point, annotation: annotation)
-            } else {
-                movingAnnotation = annotation
-                startPoint = point
-            }
+            movingAnnotation = annotation
+            startPoint = point
         case .text:
             beginText(at: point, annotation: nil)
         case .eyedropper:
@@ -319,6 +356,15 @@ final class ImageEditorSession: ObservableObject {
         guard isInputEnabled else { return }
         if tool == .eyedropper { sample(at: point); return }
         guard let startPoint else { return }
+        if let resizingAnnotation, let resizingHandle {
+            let resized = resizingAnnotation.resized(handle: resizingHandle, to: point,
+                                                     constrainedTo: document.original.pixelSize)
+            guard resized != (previewAnnotation ?? resizingAnnotation) else { return }
+            invalidatePixels()
+            previewAnnotation = resized
+            if pixelsInvalidated { renderPreview() }
+            return
+        }
         let annotation: ImageAnnotation
         if let movingAnnotation {
             let delta = CGSize(width: point.x - startPoint.x, height: point.y - startPoint.y)
@@ -345,11 +391,11 @@ final class ImageEditorSession: ObservableObject {
         guard isInputEnabled, startPoint != nil else { return }
         pointerDragged(to: point)
         let annotation = previewAnnotation
-        let moving = movingAnnotation
+        let original = movingAnnotation ?? resizingAnnotation
         clearGestureState()
-        if let annotation, moving != nil ? annotation != moving : isDrawable(annotation) {
+        if let annotation, original != nil ? annotation != original : isDrawable(annotation) {
             invalidatePixels()
-            if moving != nil { document.replace(annotation) }
+            if original != nil { document.replace(annotation) }
             else { document.add(annotation) }
         } else {
             finishPixelChange()
@@ -475,6 +521,8 @@ final class ImageEditorSession: ObservableObject {
     private func clearGestureState() {
         startPoint = nil
         movingAnnotation = nil
+        resizingAnnotation = nil
+        resizingHandle = nil
         previewAnnotation = nil
         isAdjustingMosaic = false
         mosaicAdjustmentAnnotation = nil

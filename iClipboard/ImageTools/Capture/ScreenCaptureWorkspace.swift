@@ -97,7 +97,9 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     private var toolButtons: [ImageEditorTool: NSButton] = [:]
     private var undoButton: NSButton!
     private var redoButton: NSButton!
+    private var deleteButton: NSButton!
     private var fullTextButton: NSButton!
+    private var translateButton: NSButton!
     private(set) var colorButton: NSButton!
     private var input: NSTextView?
     private var inputStyle: ImageAnnotationStyle?
@@ -129,6 +131,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         session.tool = .select
+        session.doubleClickAction = { [weak self] in self?.requestImageAction(.copy) }
         canvas.frame = imageRect
         // The editor paints dirtyRect for its scrollable canvas. Constrain that
         // painting to this exact crop when embedded in a full-screen overlay.
@@ -144,6 +147,8 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             guard let pixel = self.canvas.transform.pixelPoint(fromView: canvasPoint) else { return false }
             // Existing annotations must remain selectable/editable instead of being
             // intercepted by Live Text from the original screenshot underneath.
+            let tolerance = 7 / self.canvas.transform.scale
+            if self.session.selectionHandle(at: pixel, tolerance: tolerance) != nil { return false }
             return self.session.document.annotation(at: pixel, tolerance: 4 / self.canvas.transform.scale) == nil
         }
         configureStrip()
@@ -276,7 +281,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     private func layoutWorkspace() {
         let previousFrame = toolbarFrame
         let initial = ScreenCaptureWorkspacePlacement.toolbar(imageRect: imageRect, bounds: bounds,
-                                                               preferredWidth: 548, releasePoint: selectionReleasePoint)
+                                                               preferredWidth: 620, releasePoint: selectionReleasePoint)
         toolbarFrame = ScreenCaptureWorkspacePlacement.clampedToolbar(
             CGRect(origin: toolbarOrigin ?? initial.origin, size: initial.size), bounds: bounds)
         if toolbarOrigin != nil { toolbarOrigin = toolbarFrame.origin }
@@ -397,6 +402,24 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         if !handleKey(event) { super.keyDown(with: event) }
     }
 
+    /// Capture-level double-click routing also covers Live Text, which owns its
+    /// own mouse events. Text labels return false so the canvas can edit them.
+    func handleDoubleClick(_ event: NSEvent) -> Bool {
+        guard !isBusy, !isInvalidated, event.clickCount > 1, input == nil,
+              let window, event.window === window else { return false }
+        let local = convert(event.locationInWindow, from: nil)
+        guard imageRect.contains(local), !toolbarFrame.contains(local) else { return false }
+        let canvasPoint = canvas.convert(local, from: self)
+        guard let pixel = canvas.transform.pixelPoint(fromView: canvasPoint) else { return false }
+        if let annotation = session.document.annotation(at: pixel,
+                                                        tolerance: 5 / canvas.transform.scale),
+           annotation.kind == .text {
+            return false
+        }
+        requestImageAction(.copy)
+        return true
+    }
+
     /// Pixel clicks, including native word pixels, copy HEX. Controls and the
     /// field editor retain standard context menus. Escape/button alone cancel.
     func shouldSampleRightClick(_ event: NSEvent) -> Bool {
@@ -451,7 +474,9 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         toolButtons[.rectangle]?.state = [.rectangle, .ellipse].contains(session.tool) ? .on : .off
         undoButton.isEnabled = !isBusy && session.document.canUndo
         redoButton.isEnabled = !isBusy && session.document.canRedo
+        deleteButton.isEnabled = !isBusy && session.document.selectedID != nil
         fullTextButton.isEnabled = !isBusy && !textInteraction.fullText.isEmpty
+        translateButton.isEnabled = !isBusy && !textInteraction.fullText.isEmpty
         let useText = session.tool == .select && !session.isEditingText && !isBusy && !isChangingPixels
         textInteraction.isHidden = session.tool != .select || session.isEditingText || isChangingPixels
         textInteraction.interactionEnabled = useText
@@ -470,7 +495,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
             inputStyle = session.style
             layoutTextInput()
         }
-        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 右键复制 HEX · 全文使用已配置快捷键"))
+        status.stringValue = isBusy ? "正在完成操作…" : (errorMessage ?? session.errorMessage ?? feedbackMessage ?? (textInteraction.statusText + " · 双击复制 · 右键复制 HEX · 全文使用已配置快捷键"))
         status.textColor = errorMessage == nil && session.errorMessage == nil ? .secondaryLabelColor : .systemRed
         status.toolTip = status.stringValue
     }
@@ -515,6 +540,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         for tool in [ImageEditorTool.arrow, .line, .brush, .text, .mosaic] { addTool(tool) }
         undoButton = addButton("arrow.uturn.backward", "撤销 ⌘Z", #selector(undoAction))
         redoButton = addButton("arrow.uturn.forward", "重做 ⇧⌘Z", #selector(redoAction))
+        deleteButton = addButton("trash", "删除所选标注 · Delete", #selector(deleteSelected))
         colorButton = addButton("circle.fill", "标注颜色", #selector(showColors(_:)))
         _ = addButton("slider.horizontal.3", "线宽 / 字号 / 马赛克色块", #selector(showWidths(_:)))
         _ = addButton("doc.on.doc", "复制图片 · Enter / ⌘C", #selector(copyImage))
@@ -524,6 +550,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         fullTextButton.title = "全文"
         fullTextButton.imagePosition = .noImage
         fullTextButton.font = .systemFont(ofSize: 11, weight: .medium)
+        translateButton = addButton("character.bubble", "翻译图中文字（OCR）", #selector(translateImage))
         _ = addButton("selection.pin.in.out", "重新框选（清除标注和识字结果）", #selector(reselect))
         _ = addButton("xmark", "关闭 · Escape", #selector(closeAction))
     }
@@ -564,6 +591,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
     }
     @objc private func undoAction() { session.undo() }
     @objc private func redoAction() { session.redo() }
+    @objc private func deleteSelected() { session.deleteSelection() }
     @objc private func copyImage() { requestImageAction(.copy) }
     @objc private func saveImage() { requestImageAction(.save) }
     @objc private func pinImage() { requestImageAction(.pin) }
@@ -573,6 +601,7 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         guard !isBusy, !textInteraction.fullText.isEmpty else { return }
         onAction?(.copyText(textInteraction.fullText))
     }
+    @objc private func translateImage() { requestTranslation() }
 
     var canRequestRecognizedText: Bool {
         !isBusy && !isInvalidated && !isChangingPixels && !session.isEditingText && input == nil
@@ -583,15 +612,30 @@ final class ScreenCaptureWorkspace: NSView, NSTextViewDelegate {
         session.cancelGesture()
         scheduleRecognition()
         onAction?(.copyRecognizedText { [weak self] in
-            guard let self, !self.isInvalidated else { throw CancellationError() }
-            let text = try await self.textInteraction.recognizedText()
-            try Task.checkCancellation()
-            guard !self.isInvalidated else { throw CancellationError() }
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw ScreenCaptureTextError.empty
-            }
-            return text
+            guard let self else { throw CancellationError() }
+            return try await self.currentRecognizedText()
         })
+    }
+
+    func requestTranslation() {
+        guard canRequestRecognizedText else { return }
+        session.cancelGesture()
+        scheduleRecognition()
+        onAction?(.translateRecognizedText({ [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.currentRecognizedText()
+        }, anchor))
+    }
+
+    private func currentRecognizedText() async throws -> String {
+        guard !isInvalidated else { throw CancellationError() }
+        let text = try await textInteraction.recognizedText()
+        try Task.checkCancellation()
+        guard !isInvalidated else { throw CancellationError() }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ScreenCaptureTextError.empty
+        }
+        return text
     }
 
     enum ImageAction { case copy, save, pin }

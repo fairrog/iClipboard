@@ -490,7 +490,7 @@ private final class ScreenCaptureOverlayView: NSView {
         if let feedback { hint = feedback }
         else if intent == .color { hint = "点击取色 · 右键复制 HEX · Escape 取消" }
         else if selectionLockedElsewhere { hint = "选区已锁定在另一屏幕 · 右键复制 HEX · Escape 取消" }
-        else { hint = "拖动框选，松开后标注 / 选字 · 右键复制 HEX · Escape 取消" }
+        else { hint = "拖动框选，松开后标注 / 选字 · 双击复制 · 右键复制 HEX · Escape 取消" }
         let hintSize = textSize(hint)
         let hintRect = clampedHUD(CGRect(x: (bounds.width - hintSize.width - 28) / 2,
                                         y: 24, width: hintSize.width + 28, height: 34))

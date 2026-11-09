@@ -1257,20 +1257,41 @@ final class ImageToolsCoordinatorTests: XCTestCase {
         defer { coordinator.stop() }
         let manager = MenuBarIconManager()
         manager.applicationMenuItems = { [weak coordinator] in coordinator?.makeMenuItems() ?? [] }
-        let expectedCommands: [ImageToolsCoordinator.Command] = [.capture, .pinClipboard, .closePin, .togglePins, .closePins]
+        let expectedCommands: [ImageToolsCoordinator.Command] = [
+            .capture, .translateCapture, .pinClipboard, .closePin, .togglePins, .closePins
+        ]
         XCTAssertEqual(coordinator.makeMenuItems().compactMap { $0.representedObject as? String },
                        expectedCommands.map(\.rawValue))
         let menu = manager.makeMenu()
         XCTAssertTrue(menu.items.contains { $0.title == "区域截图…" })
+        XCTAssertTrue(menu.items.contains { $0.title == "截图翻译…" })
         XCTAssertFalse(menu.items.contains {
             $0.title == "截图识别文字…" || $0.representedObject as? String == ImageToolsCoordinator.Command.recognizeScreen.rawValue
         })
         manager.menuNeedsUpdate(menu)
         XCTAssertEqual(menu.items.filter { $0.title == "区域截图…" }.count, 1)
+        XCTAssertEqual(menu.items.filter { $0.title == "截图翻译…" }.count, 1)
         XCTAssertFalse(menu.items.contains { $0.title == "屏幕取色…" || $0.title == "截图识别文字…" })
         XCTAssertFalse(menu.items.contains {
             $0.representedObject as? String == ImageToolsCoordinator.Command.recognizeScreen.rawValue
         })
         XCTAssertTrue(menu.items.contains { $0.title == "关闭贴图" })
+    }
+
+    func testTranslateCaptureUsesDedicatedIntentWithoutCopyingFirst() async throws {
+        let (_, store, defaults, suite) = try fixture()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let capture = CaptureStub()
+        let coordinator = ImageToolsCoordinator(store: store, windowManager: WindowManager(registerHotKey: false),
+                                                 captureSession: capture,
+                                                 preferences: ImageToolsPreferences(defaults: defaults))
+        defer { coordinator.stop() }
+        coordinator.perform(.translateCapture)
+        await waitFor { capture.handler != nil }
+        XCTAssertEqual(capture.intents.count, 1)
+        guard case .translateImage = capture.intents[0] else {
+            return XCTFail("Translate capture must use its own intent")
+        }
+        capture.cancel()
     }
 }

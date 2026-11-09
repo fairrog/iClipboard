@@ -36,8 +36,11 @@ iClipboard is a native, lightweight macOS utility for clipboard management, tran
   - Requires Accessibility permission for iClipboard.
 - **📷 Image Tools**:
   - **Capture and annotate**: Select a region, window, or interface element; add shapes, arrows, text, freehand drawings, and pixelation, with undo and redo.
+  - **Adjust annotations**: Click a shape, arrow, or brush stroke with the selection tool, drag a white handle to resize or move an endpoint, and press `Delete` or the toolbar trash button to remove it.
+  - **Double-click to copy**: Double-click the captured image to copy it and finish the capture. Double-clicking a text label still edits its text.
   - **Floating images**: Pin screenshots or clipboard images on screen, with multiple pins, proportional resizing, adjustable opacity, and always-on-top controls.
   - **Extract image text**: Select text directly on supported devices or copy all image text at once. Recognition runs on your Mac without uploading images.
+  - **Screenshot translation**: Choose “Translate Screenshot…” from the menu bar or the panel's image tools, select a region, and the recognized text opens in the translation panel. The capture toolbar also has a Translate button.
   - **Pick colors and save**: Inspect magnified pixels, copy HEX colors, and copy images to the clipboard or save them as PNG.
 - **🌐 Selected-Text Translation**:
   - Translate selected text across apps, pin the translation window, and copy the result.
@@ -72,8 +75,10 @@ iClipboard is a native, lightweight macOS utility for clipboard management, tran
 
 ### Image Tools
 - **Start a capture**: Right-click the menu bar icon and choose the region capture action, use the image tools menu at the bottom of the panel, or set your own capture shortcut. Drag to select a region; press `Esc` to cancel.
+- **Translate a capture**: Choose “Translate Screenshot…” from the menu bar, then drag a region. Text recognition starts automatically and the translation panel appears. The Translate button in the capture toolbar translates the current selection on demand.
 - **Smart selection**: Choose None, Windows, or Elements in settings. When enabled, click a highlighted area to select the corresponding window or interface element.
-- **Annotate and export**: Use the selection toolbar to add annotations, then copy, save, or pin the result. The toolbar appears near where you finish selecting; drag its background or status text to move it out of the way.
+- **Annotate and export**: Use the selection toolbar to add annotations, then copy, save, or pin the result. The toolbar appears near where you finish selecting; drag its background or status text to move it out of the way. Double-click the captured image to copy it immediately.
+- **Adjust annotations**: With the selection tool, click an existing element to select it. Drag a white handle to resize a shape or move a line/arrow endpoint, drag the element itself to move it, and press `Delete` or use the toolbar trash button to remove it.
 - **Extract text**: On supported devices, select image text and press `⌘C` to copy it. Use the full-text copy button or your configured shortcut to extract all text from a capture selection or the current pin.
 - **Use floating images**: Pin a clipboard image from the menu bar, or pin a selection from the capture toolbar. Drag blank space, or hold `Option` while dragging the image, to move it. Resize from an edge or corner, or use the mouse wheel. Toolbar controls adjust opacity, toggle always-on-top, and close a pin; the menu bar context menu can show, hide, or close all pins.
 - **Pick colors**: During capture, move the pointer to inspect a magnified pixel preview and right-click to copy its HEX color. After selecting a region, hold `Option` to view the pixel preview.

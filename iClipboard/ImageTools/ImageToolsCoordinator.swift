@@ -18,7 +18,7 @@ extension ScreenCaptureSession: ScreenCapturing {}
 @MainActor
 final class ImageToolsCoordinator: NSObject {
     enum Command: String {
-        case capture, pinClipboard, recognizeScreen, closePin, togglePins, closePins
+        case capture, translateCapture, pinClipboard, recognizeScreen, closePin, togglePins, closePins
     }
 
     enum ImageAction { case copy, edit, pin, save }
@@ -51,6 +51,8 @@ final class ImageToolsCoordinator: NSObject {
     private var pendingPresentations: [() -> Void] = []
     private var ordinarySaveCount = 0
     private var pendingCapture = false
+    private var pendingCaptureTranslates = false
+    private var pendingTranslation: (text: String, anchor: CGRect)?
     private let shortcutMonitor = ImageToolsShortcutMonitor()
 
     init(store: ClipboardStore, windowManager: WindowManager, pasteboard: NSPasteboard = .general,
@@ -121,6 +123,7 @@ final class ImageToolsCoordinator: NSObject {
         guard !stopped else { return }
         switch command {
         case .capture: capture()
+        case .translateCapture: capture(translating: true)
         case .recognizeScreen:
             // Capture always owns this shortcut, including preparation/no crop.
             // Outside capture, only the key visible pin may copy its full text.
@@ -183,7 +186,9 @@ final class ImageToolsCoordinator: NSObject {
     func makeMenuItems() -> [NSMenuItem] {
         let specifications: [(String, String, Command)] = [
             ("区域截图…", "viewfinder", .capture),
+            ("截图翻译…", "character.bubble", .translateCapture),
             ("贴出剪贴板图片", "pin", .pinClipboard),
+            ("关闭贴图", "pin.slash", .closePin),
             ("显示 / 隐藏全部贴图", "eye", .togglePins),
             ("关闭全部贴图", "xmark.rectangle", .closePins)
         ]
@@ -192,7 +197,7 @@ final class ImageToolsCoordinator: NSObject {
             item.target = self
             item.representedObject = command.rawValue
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-            if command == .togglePins || command == .closePins {
+            if command == .closePin || command == .togglePins || command == .closePins {
                 item.isEnabled = pins.count > 0
             }
             return item
@@ -205,10 +210,15 @@ final class ImageToolsCoordinator: NSObject {
         DispatchQueue.main.async { [weak self] in self?.perform(command) }
     }
 
-    private func capture() {
+    private func capture(translating: Bool = false) {
         guard captureTask == nil else { return }
-        guard ordinarySaveCount == 0 else { pendingCapture = true; return }
+        guard ordinarySaveCount == 0 else {
+            pendingCapture = true
+            pendingCaptureTranslates = pendingCaptureTranslates || translating
+            return
+        }
         pendingCapture = false
+        pendingTranslation = nil
         guard !NSApp.windows.contains(where: { $0.isVisible && $0.attachedSheet != nil }),
               NSApp.modalWindow == nil else {
             showError("请先完成当前保存或确认对话框，再开始截图。")
@@ -219,11 +229,13 @@ final class ImageToolsCoordinator: NSObject {
             let restore = self.suspendPresentation()
             let result: ScreenCaptureSession.Result?
             do {
-                result = try await self.captureSession.run(.image, onAction: { [weak self] action in
+                let intent: ScreenCaptureSession.Intent = translating ? .translateImage : .image
+                result = try await self.captureSession.run(intent, onAction: { [weak self] action in
                     guard let self, !self.stopped else { throw CancellationError() }
                     return try await self.performCaptureAction(action)
                 })
             } catch {
+                self.pendingTranslation = nil
                 self.captureTask = nil
                 restore()
                 if !(error is CancellationError), !self.stopped { self.showError(error.localizedDescription) }
@@ -231,7 +243,22 @@ final class ImageToolsCoordinator: NSObject {
             }
             self.captureTask = nil
             restore()
-            guard !Task.isCancelled, !self.stopped, let result else { return }
+            guard !Task.isCancelled, !self.stopped else {
+                self.pendingTranslation = nil
+                return
+            }
+            let translation = self.pendingTranslation
+            self.pendingTranslation = nil
+            if let translation {
+                TranslationCoordinator.shared.translate(
+                    text: translation.text,
+                    anchor: translation.anchor,
+                    sourceName: "截图翻译",
+                    dismissOnOutsideClick: true
+                )
+                return
+            }
+            guard let result else { return }
             switch result {
             case let .image(image, _): self.output(image, as: .copy)
             case .completed: break
@@ -276,7 +303,11 @@ final class ImageToolsCoordinator: NSObject {
 
     private func finishOrdinarySave() {
         ordinarySaveCount -= 1
-        if ordinarySaveCount == 0, pendingCapture, !stopped { capture() }
+        if ordinarySaveCount == 0, pendingCapture, !stopped {
+            let translating = pendingCaptureTranslates
+            pendingCaptureTranslates = false
+            capture(translating: translating)
+        }
     }
 
     private func openPin(_ image: ToolImage, anchor: CGRect? = nil) {
@@ -348,7 +379,25 @@ final class ImageToolsCoordinator: NSObject {
             return try await writeText(text, ticket: beginCopy())
         case let .copyRecognizedText(readText):
             return try await writeRecognizedText(readText, ticket: beginCopy())
+        case let .translateRecognizedText(readText, anchor):
+            return try await stageTranslation(readText, anchor: anchor)
         }
+    }
+
+    private func stageTranslation(_ readText: @MainActor () async throws -> String,
+                                  anchor: CGRect) async throws -> ScreenCaptureActionOutcome {
+        guard !stopped else { throw CancellationError() }
+        try Task.checkCancellation()
+        let text = try await readText()
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ImageOutputError.noRecognizedText
+        }
+        // The capture must restore suspended panels before the translation panel
+        // can be created; capture() consumes this exactly once after restore.
+        pendingTranslation = (text, anchor)
+        return .completed
     }
 
     private func writeImage(_ image: ToolImage, as output: Output, copyTicket: CopyTicket? = nil,
@@ -497,6 +546,8 @@ final class ImageToolsCoordinator: NSObject {
         shortcutMonitor.stop()
         captureSession.onContextualKeyEvent = nil
         pendingCapture = false
+        pendingCaptureTranslates = false
+        pendingTranslation = nil
         captureTask?.cancel()
         captureSession.cancel()
         jobs.values.forEach { $0.cancel() }

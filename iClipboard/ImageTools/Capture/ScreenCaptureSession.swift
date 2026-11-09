@@ -5,7 +5,7 @@ import CoreGraphics
 /// This service neither reads nor writes the clipboard or history.
 @MainActor
 final class ScreenCaptureSession {
-    enum Intent { case image, color }
+    enum Intent { case image, color, translateImage }
     enum Result {
         case image(ToolImage, CGRect)
         case color(SampledImageColor)
@@ -228,7 +228,7 @@ final class ScreenCaptureSession {
                 self.cancel()
             }
         }
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .rightMouseDown, .flagsChanged]) { [weak self] event in
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .flagsChanged]) { [weak self] event in
             guard let self, self.completion != nil else { return event }
             let eventWindow = event.window ?? (event.type == .keyDown ? NSApp.keyWindow : nil)
             // Preparation has no window yet. A windowless Escape may also arrive
@@ -241,6 +241,10 @@ final class ScreenCaptureSession {
             }
             guard let eventWindow,
                   let panel = self.panels.first(where: { $0 === eventWindow }) else { return event }
+            if event.type == .leftMouseDown, event.clickCount > 1,
+               let workspace = panel.workspace, workspace.handleDoubleClick(event) {
+                return nil
+            }
             if event.type == .flagsChanged {
                 panel.updatePixelPreview(at: NSEvent.mouseLocation, modifiers: event.modifierFlags)
                 return event
@@ -316,6 +320,9 @@ final class ScreenCaptureSession {
                                cancel: { [weak self] in self?.cancel() },
                                willCopySelection: { [weak self] in self?.onWillCopySelection?() },
                                textInteraction: textInteractionFactory())
+            if intent == .translateImage {
+                panel.workspace?.requestTranslation()
+            }
         } catch { finish(.failure(error)) }
     }
 
@@ -344,6 +351,9 @@ final class ScreenCaptureSession {
             case .copyText, .copyRecognizedText:
                 workspace?.showError("当前调用方不支持复制文字")
                 sourcePanel?.showFeedback("当前调用方不支持复制文字")
+            case .translateRecognizedText:
+                workspace?.showError("当前调用方不支持翻译文字")
+                sourcePanel?.showFeedback("当前调用方不支持翻译文字")
             }
             return
         }

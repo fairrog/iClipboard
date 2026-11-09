@@ -706,4 +706,61 @@ final class ImageDocumentTests: XCTestCase {
         XCTAssertEqual(session.document.annotations.first?.id, id)
         XCTAssertEqual(session.document.annotations.first?.text, "已修改")
     }
+
+    func testRectangleHandleResizeKeepsOppositeCornerAndUsesOneUndoStep() throws {
+        let session = ImageEditorSession(image: try image(width: 120, height: 80))
+        let annotation = ImageAnnotation(kind: .rectangle,
+                                         points: [CGPoint(x: 10, y: 10), CGPoint(x: 30, y: 30)],
+                                         style: red)
+        session.document.add(annotation)
+        session.tool = .select
+        session.pointerDown(at: CGPoint(x: 20, y: 20), tolerance: 1, clickCount: 1)
+        session.pointerUp(at: CGPoint(x: 20, y: 20))
+        XCTAssertEqual(session.document.selectedID, annotation.id)
+
+        session.pointerDown(at: CGPoint(x: 30, y: 30), tolerance: 2, clickCount: 1)
+        session.pointerDragged(to: CGPoint(x: 50, y: 40))
+        session.pointerDragged(to: CGPoint(x: 60, y: 45))
+        session.pointerUp(at: CGPoint(x: 60, y: 45))
+
+        XCTAssertEqual(session.document.annotations.first?.bounds,
+                       CGRect(x: 10, y: 10, width: 50, height: 35))
+        session.undo()
+        XCTAssertEqual(session.document.annotations.first?.bounds,
+                       CGRect(x: 10, y: 10, width: 20, height: 20))
+    }
+
+    func testLineEndpointHandleMovesOnlyTheDraggedEndpoint() throws {
+        let session = ImageEditorSession(image: try image(width: 120, height: 80))
+        let annotation = ImageAnnotation(kind: .line,
+                                         points: [CGPoint(x: 10, y: 10), CGPoint(x: 30, y: 10)],
+                                         style: red)
+        session.document.add(annotation)
+        session.tool = .select
+        session.pointerDown(at: CGPoint(x: 30, y: 10), tolerance: 2, clickCount: 1)
+        session.pointerDragged(to: CGPoint(x: 50, y: 30))
+        session.pointerUp(at: CGPoint(x: 50, y: 30))
+        let line = try XCTUnwrap(session.document.annotations.first)
+        XCTAssertEqual(line.points, [CGPoint(x: 10, y: 10), CGPoint(x: 50, y: 30)])
+    }
+
+    func testDoubleClickCopiesBlankCanvasButKeepsTextEditing() throws {
+        let session = ImageEditorSession(image: try image(width: 120, height: 80))
+        let annotation = ImageAnnotation(kind: .text, points: [CGPoint(x: 10, y: 10)],
+                                         text: "Label", textSize: CGSize(width: 70, height: 30))
+        session.document.add(annotation)
+        session.tool = .select
+        var copies = 0
+        session.doubleClickAction = { copies += 1 }
+
+        session.pointerDown(at: CGPoint(x: 20, y: 20), tolerance: 1, clickCount: 2)
+        XCTAssertTrue(session.isEditingText)
+        XCTAssertEqual(copies, 0)
+        session.cancelText()
+
+        session.pointerDown(at: CGPoint(x: 100, y: 70), tolerance: 1, clickCount: 2)
+        XCTAssertEqual(copies, 1)
+        session.pointerUp(at: CGPoint(x: 100, y: 70))
+        XCTAssertEqual(session.document.annotations, [annotation])
+    }
 }

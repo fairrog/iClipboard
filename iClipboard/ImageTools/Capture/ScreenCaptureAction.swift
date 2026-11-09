@@ -6,11 +6,12 @@ enum ScreenCaptureAction {
     case pinImage(ToolImage, CGRect)
     case copyText(String)
     case copyRecognizedText(@MainActor () async throws -> String)
+    case translateRecognizedText(@MainActor () async throws -> String, CGRect)
 
     var endsCapture: Bool {
         switch self {
         case .copyText: return false
-        case .copyImage, .saveImage, .pinImage, .copyRecognizedText: return true
+        case .copyImage, .saveImage, .pinImage, .copyRecognizedText, .translateRecognizedText: return true
         }
     }
 
